@@ -8137,8 +8137,10 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     * ``"nonzero_exit"`` — ``WIFEXITED`` with non-zero status. Real error.
     * ``"signaled"`` — ``WIFSIGNALED`` (OOM killer, SIGKILL, etc). Real crash.
     * ``"unknown"`` — pid was not in the reap registry (either reaped by
-      something else, or died between reap tick and liveness check). Fall
-      back to existing crashed-counter behavior.
+      something else, or died between reap tick and liveness check). The
+      task is released back to its source phase WITHOUT counting a
+      failure — typical of an infra-kill (another dispatcher,
+      ``reclaim_task``, or a host SIGTERM we did not reap).
 
     ``code`` is the exit status (for ``clean_exit`` / ``rate_limited`` /
     ``nonzero_exit``) or the signal number (for ``signaled``), or ``None``
@@ -8864,9 +8866,14 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     When the reap registry shows the worker exited cleanly (rc=0) but
     the task was still ``running`` in the DB, treat it as a protocol
     violation (worker answered conversationally without calling
-    ``kanban_complete`` / ``kanban_block``) and trip the circuit breaker
-    on the first occurrence — retrying a worker whose CLI keeps
-    returning 0 without a terminal transition just loops forever.
+    ``kanban_complete`` / ``kanban_block``) and apply a bounded
+    violation-only retry before tripping the breaker.
+
+    When the reap registry has no entry (``unknown``), the death is
+    treated as an infra-kill: the task is released back to its source
+    phase without incrementing ``consecutive_failures``. A second
+    dispatcher, a manual ``reclaim_task``, or a host SIGTERM we did
+    not reap must not consume the task's failure budget.
 
     When the reap registry shows the worker exited with the rate-limit
     sentinel (``KANBAN_RATE_LIMIT_EXIT_CODE``), the worker bailed on a
@@ -8892,9 +8899,11 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     exited_hook_payloads: list[dict] = []
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock, started_at, assignee "
-            "FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            "SELECT t.id, t.worker_pid, t.claim_lock, t.assignee, "
+            "       COALESCE(r.started_at, t.started_at) AS started_at "
+            "FROM tasks t "
+            "LEFT JOIN task_runs r ON r.id = t.current_run_id "
+            "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
@@ -8904,7 +8913,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             # Skip liveness check inside the launch-window grace period
             # so a freshly-spawned worker isn't reclaimed before its PID
-            # is visible on /proc.
+            # is visible on /proc. Key off the *active run's* start, not
+            # ``tasks.started_at``: that column is first-claim sticky
+            # (``COALESCE`` on re-claim), so a retry of a card that has
+            # already been alive >grace would otherwise be reaped
+            # immediately by a second dispatch entry point (CLI / dashboard
+            # / next tick) — the t_107752ba 20s death.
             started_at = row["started_at"] if "started_at" in row.keys() else None
             if started_at is not None:
                 grace = _resolve_crash_grace_seconds()
@@ -9037,10 +9051,23 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                             (error_text[:500], row["id"]),
                         )
                     crashed.append(row["id"])
-                    crash_details.append(
-                        (row["id"], pid, row["claim_lock"],
-                         protocol_violation, error_text)
-                    )
+                    # ``unknown`` = this process did not reap the child
+                    # (another dispatcher spawned it, or an operator
+                    # reclaim SIGTERM'd it). That is an infra-kill, not
+                    # a task error — do not consume the failure budget
+                    # (t_107752ba: two unknown deaths tripped gave_up
+                    # on a healthy card that then completed).
+                    if kind == "unknown":
+                        conn.execute(
+                            "UPDATE tasks SET last_failure_error = ? "
+                            "WHERE id = ?",
+                            (error_text[:500], row["id"]),
+                        )
+                    else:
+                        crash_details.append(
+                            (row["id"], pid, row["claim_lock"],
+                             protocol_violation, error_text)
+                        )
     # Outside the main txn: account each crashed task and maybe trip the
     # breaker (the retried task transitions to blocked with a ``gave_up`` event
     # on top of the event we already emitted).
