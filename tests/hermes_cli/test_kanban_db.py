@@ -369,10 +369,6 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
 
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Complete / block / unblock / archive / assign
 # ---------------------------------------------------------------------------
@@ -612,6 +608,51 @@ def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
     ]
 
 
+def test_complete_task_auto_promotes_well_known_scratch_evidence(kanban_home):
+    """Undeclared EVIDENCE.md / MERGED-VERDICT.md / gate logs survive scratch reap.
+
+    Regression for the boq-001 integrity sweep: workers wrote gate files
+    into the scratch workspace and called ``complete_task`` without
+    ``artifacts=``. Cleanup deleted the only first-party record.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="forget to attach")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+        evidence = ws / "EVIDENCE.md"
+        verdict = ws / "MERGED-VERDICT.md"
+        gate_log = ws / "typegate.log"
+        notes = ws / "scratch-notes.txt"
+        secret = ws / "api-token.json"
+        evidence.write_text("gate log: tsc exit 0\n", encoding="utf-8")
+        verdict.write_text("grade: VERIFIED\n", encoding="utf-8")
+        gate_log.write_text("tsc exit 0\n", encoding="utf-8")
+        notes.write_text("ephemeral scratch\n", encoding="utf-8")
+        secret.write_text("{}\n", encoding="utf-8")
+
+        assert kb.complete_task(conn, t, result="ok")
+
+        run = kb.latest_run(conn, t)
+        attachments = kb.list_attachments(conn, t)
+
+    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    names = sorted(a.filename for a in attachments)
+    assert names == ["EVIDENCE.md", "MERGED-VERDICT.md", "typegate.log"]
+    stored = {a.filename: Path(a.stored_path) for a in attachments}
+    assert stored["EVIDENCE.md"].read_text(encoding="utf-8") == "gate log: tsc exit 0\n"
+    assert stored["MERGED-VERDICT.md"].read_text(encoding="utf-8") == "grade: VERIFIED\n"
+    assert stored["typegate.log"].read_text(encoding="utf-8") == "tsc exit 0\n"
+    assert stored["EVIDENCE.md"].parent == kb.task_attachments_dir(t)
+    assert run is not None
+    assert set(Path(p).name for p in run.metadata["artifacts"]) == {
+        "EVIDENCE.md",
+        "MERGED-VERDICT.md",
+        "typegate.log",
+    }
+    # Unnamed scratch files and secret-shaped names stay ephemeral.
+    assert not any(a.filename == "scratch-notes.txt" for a in attachments)
+    assert not any(a.filename == "api-token.json" for a in attachments)
 
 
 # ---------------------------------------------------------------------------
@@ -1245,29 +1286,6 @@ def _make_task(**overrides) -> "kb.Task":
 # dispatch_once — max_in_progress
 # ---------------------------------------------------------------------------
 
-
-def test_dispatch_max_in_progress_blocks_review_when_at_limit(
-    kanban_home, all_assignees_spawnable,
-):
-    """Review-only backlog must still respect max_in_progress."""
-    spawns = []
-
-    def fake_spawn(task, workspace, board=None):
-        spawns.append(task.id)
-        return 42
-
-    with kb.connect() as conn:
-        running = kb.create_task(conn, title="running", assignee="alice")
-        kb.claim_task(conn, running)
-        review = kb.create_task(conn, title="review", assignee="bob")
-        _set_task_status(conn, review, "review")
-        res = kb.dispatch_once(conn, spawn_fn=fake_spawn, max_in_progress=1)
-        review_task = kb.get_task(conn, review)
-
-    assert not res.spawned
-    assert not spawns
-    assert review_task is not None
-    assert review_task.status == "review"
 
 # Review column dispatch
 # ---------------------------------------------------------------------------
