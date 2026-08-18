@@ -7,7 +7,6 @@ import { ProfileTag } from '@/app/chat/profile-tag'
 import { startSessionDrag } from '@/app/chat/session-drag'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { openSession } from '@/app/open-session'
-import { formatMessageTimestamp } from '@/components/assistant-ui/thread/timestamp'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { OverflowTip, Tip } from '@/components/ui/tooltip'
@@ -46,7 +45,6 @@ import {
 } from './chrome'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
-import { resolveSessionRowClick } from './session-row-gesture'
 import { useProfilePrewarm } from './use-profile-prewarm'
 
 interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
@@ -55,14 +53,10 @@ interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
   branchStem?: string
   isPinned: boolean
   isSelected: boolean
-  /** Backend-derived read state — same value the dot paints. */
-  unread: boolean
   onArchive: () => void
   onBranch?: () => void
   onDelete: () => void
   onPin: () => void
-  /** Toggle the persisted read-state watermark. */
-  onToggleUnread: () => void
   onResume: () => void
   reorderable?: boolean
   dragging?: boolean
@@ -123,12 +117,10 @@ function SidebarSessionRowImpl({
   branchStem,
   isPinned,
   isSelected,
-  unread,
   onArchive,
   onBranch,
   onDelete,
   onPin,
-  onToggleUnread,
   onResume,
   reorderable = false,
   dragging = false,
@@ -152,10 +144,7 @@ function SidebarSessionRowImpl({
     toolCallCount: fmt.toolCallCount
   })
 
-  const timestamp = session.last_active || session.started_at
-  const age = formatAge(timestamp, r)
-  const timestampDate = new Date(timestamp * 1000)
-  const absoluteAge = formatMessageTimestamp(timestampDate, t.assistant.thread)
+  const age = formatAge(session.last_active || session.started_at, r)
   const handleLabel = `Reorder ${title}`
   // Opt-in row metadata from the sidebar's filter menu. Read from the store
   // rather than threaded as props: the subscription re-renders past the memo
@@ -182,7 +171,11 @@ function SidebarSessionRowImpl({
     rowMeta.includes('tokens') && totalTokens > 0 ? compactNumber(totalTokens) : null,
     // Sub-cent spend rounds to "$0.00", which reads as a bug rather than as a
     // cheap session — below a cent the row says nothing at all.
-    rowMeta.includes('cost') && cost >= 0.01 ? `$${cost.toFixed(2)}` : null
+    rowMeta.includes('cost') && cost >= 0.01 ? `$${cost.toFixed(2)}` : null,
+    // The card always shows its age — it IS the header line's right edge — and
+    // it rides the same trailing slot as everything else, so the kebab swaps
+    // over it on hover exactly like the one-line row.
+    pinnedAge || card ? age : null
   ].filter(Boolean) as string[]
 
   // Everything the Show menu puts after the title shares ONE right-aligned
@@ -202,14 +195,12 @@ function SidebarSessionRowImpl({
     trailing.push({ key: 'pr', node: <PrTag pr={pr} /> })
   }
 
-  const showAge = pinnedAge || card
-
-  if (figures.length || showAge) {
+  if (figures.length) {
     // The card's meta lines separate by spacing alone, so its header figures
     // match (non-breaking pair — plain spaces collapse to one); the one-line
     // row keeps the interpunct between joined figures.
     const sep = card ? '\u00A0\u00A0' : ' · '
-    const head = (showAge ? figures : figures.slice(0, -1)).join(sep)
+    const head = figures.slice(0, -1).join(sep)
 
     trailing.push({
       key: 'figures',
@@ -219,20 +210,7 @@ function SidebarSessionRowImpl({
           {/* The figures own their tail: the separator goes with it. */}
           <span className={cn('inline-block text-right', TAIL_HIDES)}>
             {head && sep}
-            {showAge ? (
-              <Tip label={absoluteAge} side="top">
-                <time
-                  aria-label={`${age}, ${absoluteAge}`}
-                  className="pointer-events-auto focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sidebar-ring"
-                  dateTime={timestampDate.toISOString()}
-                  tabIndex={0}
-                >
-                  {age}
-                </time>
-              </Tip>
-            ) : (
-              figures.at(-1)
-            )}
+            {figures.at(-1)}
           </span>
         </span>
       )
@@ -240,7 +218,7 @@ function SidebarSessionRowImpl({
   }
 
   // A chip that ends the slot hides whole; the figures handle their own tail.
-  const chipEndsSlot = trailing.length > 0 && !figures.length && !pinnedAge
+  const chipEndsSlot = trailing.length > 0 && !figures.length
   // A handed-off session's live source is local, but it originated on a
   // messaging platform — surface that origin as a small badge so e.g. a
   // Telegram thread continued here still reads as Telegram.
@@ -306,12 +284,10 @@ function SidebarSessionRowImpl({
         onBranch={onBranch}
         onDelete={onDelete}
         onPin={onPin}
-        onToggleUnread={onToggleUnread}
         pinned={isPinned}
         profile={session.profile}
         sessionId={session.id}
         title={title}
-        unread={unread}
       >
         <Button
           aria-label={r.sessionActions}
@@ -335,12 +311,10 @@ function SidebarSessionRowImpl({
       onBranch={onBranch}
       onDelete={onDelete}
       onPin={onPin}
-      onToggleUnread={onToggleUnread}
       pinned={isPinned}
       profile={session.profile}
       sessionId={session.id}
       title={title}
-      unread={unread}
     >
       <SidebarRowShell
         actions={card ? undefined : actionsNode}
@@ -354,12 +328,10 @@ function SidebarSessionRowImpl({
           isSelected && 'bg-(--ui-row-active-background)',
           liveTurn && 'text-foreground',
           // Opaque surface while lifted so the dragged row erases what's under
-          // it (translucency let the rows below bleed through). data-glass-opaque
-          // keeps that true when window glass thins the field.
+          // it (translucency let the rows below bleed through).
           dragging && 'z-10 cursor-grabbing bg-(--ui-sidebar-surface-background)',
           className
         )}
-        data-glass-opaque={dragging ? '' : undefined}
         data-working={liveTurn ? 'true' : undefined}
         // The row runs BOTH drags off one press, and each declines outside its
         // own region — so no timing/arbitration rule is needed and neither can
@@ -411,37 +383,39 @@ function SidebarSessionRowImpl({
             openSession(session.id, () => undefined, 'tab')
           })}
           onClick={event => {
-            // Modifier-click gestures on a row (see `resolveSessionRowClick`):
-            //   ⇧          → pin / unpin
-            //   ⌘/⌃        → open in a new tab (stack into main)
-            //   ⌘/⌃ + ⇧    → pop into its own window (needs standalone windows)
-            //   ⌥ + ⇧      → archive
-            // A plain click resumes. Archive also lives in the row's ⋯ and
-            // right-click menus and as a rebindable hotkey (`session.archive`).
-            // `openSession`'s 'window' intent already falls back to 'tab' when
-            // the bridge lacks standalone windows, so the resolver can always
-            // offer the window action here.
-            const action = resolveSessionRowClick(event, { canOpenWindow: true })
+            const mod = event.metaKey || event.ctrlKey
 
-            if (action === 'resume') {
-              onResume()
+            // ⇧⌘-click → pop into its own window (needs standalone windows).
+            if (mod && event.shiftKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              triggerHaptic('selection')
+              openSession(session.id, () => undefined, 'window')
 
               return
             }
 
-            event.preventDefault()
-            event.stopPropagation()
-            triggerHaptic('selection')
-
-            if (action === 'archive') {
-              onArchive()
-            } else if (action === 'pin') {
-              onPin()
-            } else if (action === 'newTab') {
+            // ⌘/⌃-click → open in a new tab (stack into main).
+            if (mod) {
+              event.preventDefault()
+              event.stopPropagation()
+              triggerHaptic('selection')
               openSession(session.id, () => undefined, 'tab')
-            } else {
-              openSession(session.id, () => undefined, 'window')
+
+              return
             }
+
+            // ⇧-click → pin.
+            if (event.shiftKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              triggerHaptic('selection')
+              onPin()
+
+              return
+            }
+
+            onResume()
           }}
         >
           {(() => {
@@ -576,7 +550,6 @@ function rowPropsEqual(a: SidebarSessionRowProps, b: SidebarSessionRowProps): bo
     a.session === b.session &&
     a.isPinned === b.isPinned &&
     a.isSelected === b.isSelected &&
-    a.unread === b.unread &&
     a.branchStem === b.branchStem &&
     a.reorderable === b.reorderable &&
     a.dragging === b.dragging &&

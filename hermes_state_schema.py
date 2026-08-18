@@ -86,18 +86,7 @@ class SessionSchemaMixin:
     """See module docstring — mixin for SessionDB (Schema cluster)."""
 
     def _dedupe_legacy_system_prompts(self, cursor: sqlite3.Cursor) -> None:
-        """Move inline prompt snapshots into the shared content-addressed table.
-
-        Contention-safe by design: a ``database is locked`` (or any other
-        ``OperationalError``) mid-loop returns instead of raising. Partial
-        migration is safe — the legacy ``system_prompt`` column is kept as a
-        read fallback for unmigrated rows, and the next schema init picks up
-        the remainder. Letting the error propagate aborted schema init
-        entirely, left the version below 25, and made every subsequent
-        ``SessionDB.__init__`` re-enter this migration against the same
-        contended DB (enterprise field report, 2026-08-14: gateway watchdog
-        crash loop).
-        """
+        """Move inline prompt snapshots into the shared content-addressed table."""
         try:
             rows = cursor.execute(
                 "SELECT id, system_prompt FROM sessions "
@@ -109,22 +98,13 @@ class SessionSchemaMixin:
         for row in rows:
             session_id = row["id"] if isinstance(row, sqlite3.Row) else row[0]
             prompt = row["system_prompt"] if isinstance(row, sqlite3.Row) else row[1]
-            try:
-                prompt_hash = self._store_system_prompt(cursor, prompt)
-                cursor.execute(
-                    "UPDATE sessions "
-                    "SET system_prompt_hash = ?, system_prompt = NULL "
-                    "WHERE id = ?",
-                    (prompt_hash, session_id),
-                )
-            except sqlite3.OperationalError as exc:
-                logger.warning(
-                    "v25 prompt dedupe paused after contention (%s); "
-                    "unmigrated rows keep the legacy inline prompt and the "
-                    "next schema init resumes the migration.",
-                    exc,
-                )
-                return
+            prompt_hash = self._store_system_prompt(cursor, prompt)
+            cursor.execute(
+                "UPDATE sessions "
+                "SET system_prompt_hash = ?, system_prompt = NULL "
+                "WHERE id = ?",
+                (prompt_hash, session_id),
+            )
 
     def _sqlite_supports_fts5(self, cursor: sqlite3.Cursor) -> bool:
         try:

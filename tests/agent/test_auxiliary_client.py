@@ -506,6 +506,11 @@ class TestNormalizeAuxProvider:
         assert _normalize_aux_provider("github-copilot-acp") == "copilot-acp"
         assert _normalize_aux_provider("copilot-acp-agent") == "copilot-acp"
 
+    def test_maps_cursor_acp_aliases(self):
+        assert _normalize_aux_provider("cursor-acp") == "cursor-acp"
+        assert _normalize_aux_provider("cursor-acp-agent") == "cursor-acp"
+        assert _normalize_aux_provider("cursor-agent-acp") == "cursor-acp"
+
 
 class TestReadCodexAccessToken:
     def test_valid_auth_store(self, tmp_path, monkeypatch):
@@ -2933,14 +2938,6 @@ class TestCodexAdapterPromptCacheKey:
             base_url="https://bedrock-mantle.us-west-2.api.aws/v1",
             model=model,
         )
-        adapter.create(messages=[
-            {"role": "system", "content": "SYS"},
-            {"role": "user", "content": "hi"},
-        ])
-        assert captured["prompt_cache_retention"] == "24h"
-
-    def test_meta_endpoint_includes_prompt_cache_retention(self):
-        adapter, captured = self._build_adapter(base_url="https://api.meta.ai/v1", model="muse-spark-1.2")
         adapter.create(messages=[
             {"role": "system", "content": "SYS"},
             {"role": "user", "content": "hi"},

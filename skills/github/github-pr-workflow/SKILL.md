@@ -1,7 +1,7 @@
 ---
 name: github-pr-workflow
 description: "GitHub PR lifecycle: branch, commit, open, CI, merge."
-version: 1.1.0
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -57,6 +57,28 @@ echo "Owner: $OWNER, Repo: $REPO"
 
 ## 1. Branch Creation
 
+### Reuse an existing branch before you create one
+
+A new branch for work that already has one is how duplicate PRs get made. Before
+`git checkout -b`, check whether this work is already in flight:
+
+```bash
+git fetch origin
+git worktree list                 # is it already checked out somewhere?
+git branch -a | rg 'feat/t-'      # task branches already minted?
+```
+
+- If the task/card body **names** a branch (e.g. `feat/t-<OTHER-ID>-...`), that
+  branch IS the assignment. Continue it. A new task id does not rename it.
+- If a worktree or branch for this work exists, reuse it. Do not create a
+  parallel one just to avoid a name collision.
+- Only when nothing exists, create a new branch.
+
+**Done when** you have either checked out the existing branch/worktree for this
+work, or confirmed with the commands above that none exists.
+
+### Creating a genuinely new branch
+
 This part is pure `git` — identical either way:
 
 ```bash
@@ -107,6 +129,45 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`, `perf`
 
 ```bash
 git push -u origin HEAD
+```
+
+### Sweep for existing work FIRST (required before `gh pr create`)
+
+Opening a second PR for work that already has one wastes the work and splits the
+review. Never call `gh pr create` before running this sweep:
+
+```bash
+BRANCH=$(git branch --show-current)
+
+# 1. Is there already a PR from this exact head?
+gh pr list --head "$BRANCH"
+
+# 2. Is there already an open PR for this feature? Use 2+ keyword/synonym
+#    variants of the change, not just one phrasing.
+gh pr list --search "<feature keywords>" --state open
+gh pr list --search "<subsystem> <symptom>" --state open
+
+# 3. Is the work already in flight on another branch/worktree?
+git worktree list
+git branch -a | rg 'feat/t-'
+```
+
+Then decide before creating anything:
+
+- An open PR already implements this task → **push to that head**, or STOP and
+  hand the existing PR back. Do not open a second draft PR.
+- The task/card body names an existing WIP branch → that branch is the
+  assignment; push there.
+- Nothing found → proceed to create the PR below.
+
+**Done when** you know every open PR and every existing branch/worktree touching
+this work, or have confirmed none exists.
+
+With `git + curl` instead of `gh`:
+
+```bash
+curl -s -H "Authorization: token ***" \
+  "https://api.github.com/repos/$OWNER/$REPO/pulls?state=open&head=$OWNER:$BRANCH"
 ```
 
 ### Create the PR

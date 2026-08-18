@@ -68,7 +68,6 @@ export const zh: Translations = {
       connectingGateway: '正在连接桌面网关',
       loadingSettings: '正在加载 Hermes 设置',
       loadingSessions: '正在加载最近会话',
-      retryingRemoteBackend: '正在重新连接远程 Hermes 后端…',
       startingDesktopConnection: '正在启动桌面连接',
       startingHermesDesktop: '正在启动 Hermes 桌面版…'
     },
@@ -128,14 +127,6 @@ export const zh: Translations = {
     updateReadyMessage: count => `有 ${count} 项新更改可用。`,
     updateReadyMessageUnknown: '有新更新可用。',
     seeWhatsNew: '查看更新内容',
-    mcp: {
-      needsAuthTitle: 'MCP 服务器需要重新认证',
-      needsAuthMessage: name => `${name} MCP 需要重新认证。`,
-      errorTitle: 'MCP 服务器无法连接',
-      errorMessage: name => `${name} MCP 健康检查失败。`,
-      signIn: '登录',
-      view: '查看'
-    },
     errors: {
       elevenLabsNeedsKey: 'ElevenLabs STT 需要 ELEVENLABS_API_KEY。',
       elevenLabsRejectedKey: 'ElevenLabs 拒绝了该 API key (401)。',
@@ -210,7 +201,7 @@ export const zh: Translations = {
     enterHud: 'HUD 模式',
     exitHud: '退出 HUD 模式',
     layoutEditor: '布局编辑器',
-    layoutEditorTitle: mod => `布局编辑器 — ${mod} 点击重置布局`
+    layoutEditorTitle: '布局编辑器 — ⌘ 点击重置布局'
   },
 
   keybinds: {
@@ -257,7 +248,6 @@ export const zh: Translations = {
       'session.slot.9': '切换到最近会话 9',
       'session.focusSearch': '搜索会话',
       'session.togglePin': '固定/取消固定当前会话',
-      'session.archive': '归档当前会话',
       'workspace.newWorktree': '新建工作树',
       'workspace.openFolder': '打开文件夹为项目',
       'composer.focus': '聚焦输入框',
@@ -344,6 +334,7 @@ export const zh: Translations = {
       providerApiKeys: 'API 密钥',
       providerCustomEndpoints: '自定义端点',
       gateway: '网关',
+      connections: '连接',
       apiKeys: '工具与密钥',
       keybinds: '键盘快捷键',
       keysTools: '工具',
@@ -371,8 +362,7 @@ export const zh: Translations = {
       agent: {
         title: '智能体插件',
         blurb:
-          '你安装到 Hermes 后端的插件——工具、技能、MCP 服务器、钩子和斜杠命令。「便携」插件是 Agent Plugins 标准包（技能 + MCP 组合，也可在其他智能体中使用）。开关在新会话中生效。',
-        appliesTo: '应用于：',
+          '运行在 Hermes 后端——工具、技能、MCP 服务器、钩子和斜杠命令。「便携」插件是 Agent Plugins 标准包（技能 + MCP 组合，也可在其他智能体中使用）。开关在新会话中生效。',
         empty: '尚未安装智能体插件。',
         loadFailed: '无法加载智能体插件',
         portable: '便携',
@@ -476,27 +466,10 @@ export const zh: Translations = {
       terminalFontReset: '使用默认字体',
       translucencyTitle: '窗口透明',
       translucencyDesc: '让整个窗口透出桌面。仅支持 macOS 和 Windows。',
-      translucencyGlassDesc: '磨砂玻璃：桌面以柔和模糊透出，文字保持清晰。仅支持 macOS。',
-      translucencyModeClear: '透明',
-      translucencyModeGlass: '玻璃',
-      translucencyFrostTitle: '磨砂质感',
-      translucencyFrost: {
-        'under-window': '深邃',
-        popover: '柔和',
-        titlebar: '明亮',
-        header: '透亮'
-      },
-      translucencyScopeTitle: '应用范围',
-      translucencyScope: {
-        window: '整个窗口',
-        sidebar: '仅侧边栏'
-      },
       backdropTitle: '聊天背景',
       backdropDesc: '对话后方那张淡淡的雕像图片。',
       reactionsTitle: '消息回应',
       reactionsDesc: 'iMessage 风格的表情回应 — 你可以给消息添加回应，Hermes 也能回应你的消息。',
-      composerPopoutTitle: '悬浮输入框',
-      composerPopoutDesc: '允许将输入框拖出底部停靠区。关闭后，输入框会锁定在底部。',
       embedsTitle: '内嵌预览',
       embedsDesc:
         '富预览会从第三方网站（YouTube、X 等）加载。询问会在你允许前显示占位符；总是会自动加载；关闭则保留纯链接。',
@@ -786,10 +759,6 @@ export const zh: Translations = {
       heading: 'Hermes Desktop',
       version: value => `版本 ${value}`,
       versionUnavailable: '版本不可用',
-      bundleOutOfSync: '应用构建版本过旧',
-      bundleOutOfSyncDesc:
-        'Hermes 运行时已更新,但桌面应用本身仍是旧构建——在应用更新之前,新的界面功能(如 Bot Mode)不会显示。请运行下方的更新以重新构建应用。如果此警告仍未消除,请从最新的桌面安装程序重新安装。',
-      bundleOutOfSyncAction: '获取安装程序',
       updates: '更新',
       checkNow: '立即检查',
       checking: '检查中…',
@@ -830,12 +799,9 @@ export const zh: Translations = {
       autosaveFailed: '自动保存失败',
       imported: '配置已导入',
       invalidJson: '配置 JSON 无效',
-      toolsetsWipeConfirm:
-        '确定移除所有已启用的工具集吗？这将禁用记忆、终端、网络搜索、委派以及大多数其他工具，直到你重新启用它们。',
+      toolsetsWipeConfirm: '确定移除所有已启用的工具集吗？这将禁用记忆、终端、网络搜索、委派以及大多数其他工具，直到你重新启用它们。',
       keepAwakeTitle: '保持电脑唤醒',
       keepAwakeDesc: '阻止本机休眠，让长时间或通宵运行继续进行。屏幕仍可变暗。',
-      disableF12Title: '禁用 F12 开发者工具',
-      disableF12Desc: '阻止 F12 打开开发者工具。Ctrl+Shift+I（Mac 上为 Cmd+Opt+I）仍然可用。',
       attachmentSizeTitle: '预览 / 图片加载大小上限',
       attachmentSizeDesc:
         '桌面端为预览和图片附件加载本地文件的大小上限（MB）。默认为 16。远程非图片附件使用单独的 256 MB 上限。设置过大会将整个文件读入内存，可能导致应用卡死或崩溃。',
@@ -875,7 +841,7 @@ export const zh: Translations = {
     connections: {
       title: '连接',
       intro: '注册你的智能体所在的每个位置——本机、局域网中的远程网关、Hermes Cloud 实例——全部保存在这里。',
-      stagedNote: '聊天和智能体列表会跟随你选择的来源；应用管理的窗口后端仍在“设置 → 网关”中选择。',
+      stagedNote: '多来源路由正在分阶段推出：目前在此管理连接，活动连接仍在“设置 → 网关”中选择。',
       loadFailed: '无法加载连接',
       primaryPill: '主连接',
       managedPill: '本机',
@@ -890,11 +856,6 @@ export const zh: Translations = {
       testFailed: '连接测试失败',
       saveFailed: '无法保存连接',
       removeFailed: '无法移除连接',
-      updateAll: '更新所有实例',
-      updateAllRunning: '正在更新所有实例…',
-      updateAllDone: '更新已分发',
-      updateAllFailed: '批量更新失败',
-      updateSkippedCloud: '由 Hermes Cloud 托管',
       kindLocal: '本地',
       kindRemote: '远程网关',
       kindCloud: 'Hermes Cloud',
@@ -908,19 +869,6 @@ export const zh: Translations = {
       labelPlaceholder: '家庭服务器',
       urlTitle: '网关 URL',
       sshHostTitle: 'SSH 主机',
-      headersTitle: '额外网关请求头',
-      headersDesc:
-        '随发往此网关的每个 HTTP 和 WebSocket 请求一起发送——用于 Cloudflare Access 等访问代理（CF-Access-Client-Id / CF-Access-Client-Secret）。值加密存储。由 Hermes 管理的请求头（Authorization、Cookie、Host 等）会被忽略。',
-      headerValuePlaceholder: '值',
-      headerValueSaved: '已保存——留空以保留',
-      headerAdd: '添加请求头',
-      headerRemove: '移除',
-      duplicateLocal: '本应用已管理一个本地连接——只能有一个。',
-      duplicateUrl: (label: string) => `已存在指向此网关 URL 的连接（“${label}”）。`,
-      duplicateSsh: (label: string) => `已存在指向此 SSH 主机的连接（“${label}”）。`,
-      sameBackendHint: (label: string) => `与“${label}”是同一后端`,
-      localAddHint: '“本地”不可用：应用管理的本地连接已存在（永远只有一个）。',
-      cloudAddHint: '提示：在上方登录 Hermes Cloud 可自动发现你的智能体——此表单仅用于手动注册已知的实例 URL。',
       save: '保存连接',
       saving: '保存中…',
       cancel: '取消',
@@ -933,12 +881,18 @@ export const zh: Translations = {
       title: '网关连接',
       envOverride: '环境变量覆盖',
       intro:
-        'Hermes Desktop 默认会启动自己的本地网关。当你希望此应用控制另一台机器上或可信代理后的现有 Hermes 后端时，可以使用远程网关。网关连接属于本机级设置；profile 是从所连接的网关中发现的。',
+        'Hermes Desktop 默认会启动自己的本地网关。当你希望此应用控制另一台机器上或可信代理后的现有 Hermes 后端时，可以使用远程网关。下面可按 profile 指定各自的远程主机。',
+      appliesTo: '应用于',
+      allProfiles: '所有 profile',
+      defaultConnection: '默认连接会用于所有没有自定义覆盖的 profile。',
+      profileConnection: profile => `仅当“${profile}”是当前 profile 时使用此连接。选择“使用默认网关”可移除其覆盖。`,
       envOverrideTitle: '环境变量正在控制此桌面会话。',
       envOverrideDesc: '取消设置 HERMES_DESKTOP_REMOTE_URL 和 HERMES_DESKTOP_REMOTE_TOKEN 后才会使用下面保存的设置。',
       modeTitle: '连接模式',
       localTitle: '本地网关',
       localDesc: '在 localhost 启动私有 Hermes 后端。这是默认方式，并且可离线工作。',
+      inheritTitle: '使用默认网关',
+      inheritDesc: '移除此 profile 的自定义覆盖并使用默认连接。',
       remoteTitle: '远程网关',
       remoteDesc: '将此桌面外壳连接到远程 Hermes 后端。',
       remoteAuthHint: '托管网关使用 OAuth 或用户名密码；自托管网关也可能使用会话 token。',
@@ -1044,6 +998,8 @@ export const zh: Translations = {
       sshHermesPathTitle: 'Hermes 路径（可选）',
       sshHermesPathDesc: '远程 hermes 可执行文件的完整路径。留空 = 自动检测。',
       sshHermesPathPlaceholder: '自动检测',
+      sshRemoteProfileTitle: '远程配置文件（可选）',
+      sshRemoteProfileDesc: '远程主机上的配置文件名称。留空 = 使用 Desktop 配置文件名称。',
       sshTestConnection: '测试 SSH',
       sshConnect: '连接',
       sshButtonsHint: '“保存”将在下次启动时生效，“连接”则立即重新连接。',
@@ -1064,10 +1020,6 @@ export const zh: Translations = {
       loading: '正在加载 API 密钥和凭据...',
       failedLoad: 'API 密钥加载失败',
       empty: '此类别暂时没有配置项。'
-    },
-    profileScope: {
-      appliesTo: '应用于',
-      editsProfile: profile => `此页面的更改将应用于“${profile}”配置文件。`
     },
     mcp: {
       loading: '正在加载 MCP 服务器...',
@@ -1121,9 +1073,6 @@ export const zh: Translations = {
       catalogEnvRequired: '安装前请填写必需的值。',
       capabilitySummary: (tools, prompts, resources) =>
         `已启用 ${[`${tools} 个工具`, ...(prompts ? [`${prompts} 个提示`] : []), ...(resources ? [`${resources} 个资源`] : [])].join('、')}`,
-      costTokens: tokens => `每次调用约 ${tokens} token`,
-      usage30d: uses => `30 天内 ${uses} 次调用`,
-      unusedPill: '未使用',
       statusConnecting: '连接中…',
       statusNeedsAuth: '需要认证',
       statusError: '错误',
@@ -1136,25 +1085,7 @@ export const zh: Translations = {
       unsavedConnect: '未保存 — 保存 mcp.json 以连接。',
       enableTool: tool => `启用 ${tool}`,
       disableTool: tool => `禁用 ${tool}`,
-      noOutput: '暂无输出。',
-      deepLinkTitle: '添加 MCP 服务器？',
-      deepLinkDescription:
-        '一个链接请求将此 MCP 服务器添加到 Hermes。请检查下方的完整配置——它来自该链接，而非 Hermes。',
-      deepLinkStdioWarning: '此服务器会使用下方所示命令在你的电脑上运行本地进程。仅在信任其来源时继续。',
-      deepLinkConfirm: '添加服务器',
-      deepLinkNameInvalid: '名称须为 1-64 个字母、数字、点、连字符或下划线。',
-      deepLinkNameConflict: name => `已存在名为 ${name} 的服务器——请改用其他名称或取消。`,
-      deepLinkErrorTitle: 'MCP 安装链接已拒绝',
-      deepLinkErrorName: '链接中的服务器名称缺失或无效。',
-      deepLinkErrorConfig: '链接中的配置不是有效的 base64 编码 JSON。',
-      deepLinkErrorShape: '配置必须是包含字符串 `url` 或 `command` 字段的 JSON 对象。',
-      deepLinkErrorUrl: '仅允许 http:// 和 https:// 服务器地址。',
-      deepLinkErrorTooLarge: '配置负载超过 32KB 上限。',
-      importButton: '导入',
-      importPlaceholder: '粘贴 mcp.json 片段、npx/docker 命令、claude mcp add 命令、URL 或 Cursor 链接…',
-      importNoMatch: '粘贴的文本中未识别到服务器配置。',
-      importConfirm: '添加到 mcp.json',
-      importConfirmMany: count => `添加 ${count} 个服务器到 mcp.json`
+      noOutput: '暂无输出。'
     },
     model: {
       loading: '正在加载模型配置...',
@@ -1329,6 +1260,7 @@ export const zh: Translations = {
     tabToolsets: '工具集',
     configuringProfile: '正在配置：',
     tabMcp: 'MCP',
+    tabHub: '浏览技能中心',
     all: '全部',
     searchSkills: '搜索技能…',
     searchToolsets: '搜索工具集…',
@@ -1421,11 +1353,6 @@ export const zh: Translations = {
       updateStarted: '正在更新已安装技能…',
       actionFailed: '技能操作失败',
       actionLog: '操作日志',
-      alreadyInstalled: name => `“${name}”已安装`,
-      pickerTitle: '技能中心',
-      pickerBrowse: '浏览完整技能中心',
-      pickerHide: '隐藏技能中心浏览器',
-      pickerHint: '点击任意技能上的“+ Add to this Agent”即可安装，安装后会出现在上方列表中。',
       loadFailed: '技能中心加载失败',
       previewFailed: '技能预览失败',
       scanFailed: '安全扫描失败',
@@ -1910,7 +1837,6 @@ export const zh: Translations = {
     showAllProfiles: '显示全部配置档案',
     switchToProfile: name => `切换到 ${name}`,
     manageProfiles: '管理配置档案…',
-    connectGateway: '连接另一个 Hermes 网关…',
     actions: '操作',
     color: '颜色…',
     colorFor: '颜色',
@@ -1959,9 +1885,6 @@ export const zh: Translations = {
     creating: '创建中…',
     createAction: '创建配置档案',
     renameTitle: '重命名配置档案',
-    displayNameTitle: '为智能体命名',
-    displayNameDesc: '设置一个在整个应用中显示的名称。内部配置档案 ID 仍为 "default"。',
-    displayNameLabel: '显示名称',
     renameDescPrefix: '重命名会更新配置档案目录以及 ',
     renameDescSuffix: ' 中的所有包装脚本。',
     newNameLabel: '新名称',
@@ -2251,7 +2174,6 @@ export const zh: Translations = {
       baseBranchPlaceholder: '搜索分支…',
       baseBranchNone: '未找到分支',
       startWorkFailed: '无法创建工作树',
-      worktreeStaleBackend: '请更新 Hermes 后端以在此远程连接上创建工作树 —— 该后端早于 git 工作树 API。',
       worktreeProjectLabel: '项目',
       worktreeProjectPlaceholder: '搜索项目…',
       worktreeProjectNone: '没有包含文件夹的项目',
@@ -2287,9 +2209,6 @@ export const zh: Translations = {
     row: {
       pin: '置顶',
       unpin: '取消置顶',
-      markUnread: '标记为未读',
-      markRead: '标记为已读',
-      unreadFailed: '无法更新未读状态',
       copyId: '复制 ID',
       export: '导出',
       branchFrom: '分支',
@@ -2338,8 +2257,7 @@ export const zh: Translations = {
     statusDivider: {
       working: '进行中',
       done: '已完成'
-    },
-    markAllRead: '全部标记为已读'
+    }
   },
 
   composer: {
@@ -2477,12 +2395,6 @@ export const zh: Translations = {
       done: skill => `已添加 /${skill}`,
       doneTip: '发送时将加载该技能'
     },
-    githubSuggestions: {
-      label: '设置 GitHub',
-      tip: '这里通过 gh CLI 技能使用 GitHub — 点击连接你的账号',
-      done: '已添加 /github-auth',
-      doneTip: '发送消息后，agent 将引导你完成 GitHub 登录'
-    },
     repairSuggestions: {
       label: server => `重新连接 ${server}`,
       tip: server => `${server} 调用刚因连接错误失败`,
@@ -2561,7 +2473,7 @@ export const zh: Translations = {
       scopeLastTurn: '上一轮',
       commit: '提交',
       commitAndPush: '提交并推送',
-      commitPlaceholder: shortcut => `信息（${shortcut} 提交）`,
+      commitPlaceholder: '信息（⌘↵ 提交）',
       generateCommitMessage: '生成提交信息',
       stopGenerating: '停止生成',
       createPr: '创建 PR',
@@ -2624,17 +2536,6 @@ export const zh: Translations = {
     applyingClose: '此窗口会在更新期间关闭，随后 Hermes 会自动重新打开。',
     errorTitle: '更新未完成',
     errorBody: '没有数据丢失。你可以现在重试。',
-    blockerTitle: '关闭本地预览以更新 Hermes？',
-    blockerBody: 'Hermes 需要在更新前停止这些本地预览。这不会修改或删除你的文件。',
-    foreignBlockerTitle: '关闭其他进程以更新 Hermes',
-    foreignBlockerBody: 'Hermes 无法安全地自动关闭这些进程。请关闭拥有这些进程的应用、终端或服务，然后重试更新。',
-    mixedBlockerBody: 'Hermes 可以关闭下方列出的本地预览。其他进程必须手动关闭，更新才能继续。',
-    closePreviewsAndUpdate: '关闭预览并更新',
-    closePreviewsAndCheckAgain: '关闭预览并重新检查',
-    localPreview: '本地预览',
-    portLabel: port => `端口 ${port}`,
-    pidLabel: pid => `PID ${pid}`,
-    technicalDetails: '技术详情',
     notNow: '暂不',
     applyStatus: {
       preparing: '正在更新后端…',
@@ -2846,7 +2747,6 @@ export const zh: Translations = {
       inferenceNotReady: '推理未就绪',
       checkingInference: '正在检查推理',
       disconnected: '已断开',
-      reconnectGateway: '重连网关',
       openSystem: '打开系统面板',
       connection: label => `连接：${label}`,
       recentActivity: '最近活动',
@@ -3127,7 +3027,6 @@ export const zh: Translations = {
       thought: '已思考',
       thoughtBriefly: '思考了片刻',
       thoughtFor: duration => `思考了 ${duration}`,
-      turnDuration: duration => `本轮耗时 ${duration}`,
       today: time => `今天，${time}`,
       yesterday: time => `昨天，${time}`,
       copy: '复制',
@@ -3320,7 +3219,6 @@ export const zh: Translations = {
     stopFailed: '停止失败',
     regenerateFailed: '重新生成失败',
     editFailed: '编辑失败',
-    editTurnUnavailable: '此回合已不在服务器历史中（可能已被压缩移除）。',
     resumeFailed: '恢复失败',
     resumeStrandedTitle: '无法加载此会话',
     resumeStrandedBody: '与此会话的连接失败，自动重试已停止。请确认网关正在运行，然后重试。',

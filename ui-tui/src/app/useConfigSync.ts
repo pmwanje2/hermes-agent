@@ -289,10 +289,7 @@ export const applyDisplay = (
     sections: resolveSections(d.sections),
     showReasoning: !!d.show_reasoning,
     statusBar: normalizeStatusBar(d.tui_statusbar),
-    streaming: d.streaming !== false,
-    // The SAME key that stamps [HH:MM] on classic-CLI labels (#41531) —
-    // no separate TUI knob.
-    timestamps: d.timestamps === true
+    streaming: d.streaming !== false
   })
 }
 

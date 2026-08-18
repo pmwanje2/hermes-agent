@@ -22,14 +22,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { ColorSwatches } from '@/components/ui/color-swatches'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  preventCloseButtonAutoFocus
-} from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, preventCloseButtonAutoFocus } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { renameSession } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -44,15 +37,12 @@ import {
   $connection,
   $selectedStoredSessionId,
   $sessions,
-  $unreadFinishedSessionIds,
-  markSessionRead,
   sessionMatchesStoredId,
   sessionPinId,
   setSessions
 } from '@/store/session'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
 import { $sessionTiles } from '@/store/session-states'
-import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
 
 import type { SessionTitleResponse } from '../../types'
@@ -106,12 +96,8 @@ interface SessionActions {
   sessionId: string
   title: string
   pinned?: boolean
-  /** Backend-derived read state — drives the Mark as unread/read label. */
-  unread?: boolean
   profile?: string
   onPin?: () => void
-  /** Toggle the persisted read-state watermark for this row. */
-  onToggleUnread?: () => void
   onBranch?: () => void
   onArchive?: () => void
   onDelete?: () => void
@@ -192,10 +178,8 @@ function useSessionActions({
   sessionId,
   title,
   pinned = false,
-  unread = false,
   profile,
   onPin,
-  onToggleUnread,
   onBranch,
   onArchive,
   onDelete,
@@ -219,9 +203,6 @@ function useSessionActions({
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const isRemote = useStore($connection)?.mode === 'remote'
-  // The row's finished-unread dot is cleared by opening the session (main or
-  // tile) — this menu item is the explicit escape hatch for the rest.
-  const isUnread = useStore($unreadFinishedSessionIds).includes(sessionId)
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
@@ -308,34 +289,6 @@ function useSessionActions({
       onSelect: () => {
         triggerHaptic('selection')
         onPin?.()
-      }
-    }),
-    // One read-state item, driven by BOTH unread sources: the transient
-    // finished-unread dot (isUnread) and the backend watermark (unread).
-    // "Mark as read" clears whichever is lit; "Mark as unread" arms the
-    // persisted watermark so the dot survives restarts.
-    spec({
-      disabled: !sessionId || (!onToggleUnread && !isUnread),
-      // Closed envelope = unread, open envelope = read (codicon has mail and
-      // mail-read, but no mail-unread glyph — verified against the font css).
-      icon: unread || isUnread ? 'mail-read' : 'mail',
-      label: unread || isUnread ? r.markRead : r.markUnread,
-      onSelect: () => {
-        triggerHaptic('selection')
-
-        if (unread || isUnread) {
-          // Clear the transient family dot immediately (and ack the persisted
-          // watermark/marker so a list refresh doesn't repaint it)…
-          markSessionRead(sessionId)
-          ackStoredSessionId(sessionId)
-
-          // …and retire the persisted watermark when the row carries one.
-          if (unread) {
-            onToggleUnread?.()
-          }
-        } else {
-          onToggleUnread?.()
-        }
       }
     })
   ]

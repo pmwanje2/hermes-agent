@@ -134,6 +134,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CURSOR_ACP_BASE_URL = "acp://cursor"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 DEFAULT_ACTUAL_BASE_URL = "https://api.actual.inc/v1"
 DEFAULT_ACTUAL_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -304,6 +305,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "cursor-acp": ProviderConfig(
+        id="cursor-acp",
+        name="Cursor ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CURSOR_ACP_BASE_URL,
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -2110,6 +2117,7 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "cursor-acp-agent": "cursor-acp", "cursor-agent-acp": "cursor-acp",
         "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth",
@@ -2180,29 +2188,7 @@ def resolve_provider(
     except Exception as e:
         logger.debug("Could not read config.yaml model.provider for auto-resolution: %s", e)
 
-    # Scope-aware key reads: under multiplex a secondary profile's API keys
-    # live only in its secret scope, not os.environ — a bare getenv here
-    # would find nothing and auto-resolution would report "No LLM provider
-    # configured" for every secondary profile (same class as #86905).
-    # Catch ONLY ImportError: any other failure inside auxiliary_client must
-    # propagate — silently falling back to os.getenv would reintroduce the
-    # very fail-open this PR removes, with zero trace.
-    try:
-        from agent.auxiliary_client import _scoped_key_env
-    except ImportError:
-        logger.warning(
-            "agent.auxiliary_client unavailable (%s); provider auto-detection "
-            "will read keys from the process environment only — under "
-            "multiplex, secondary profiles may report 'No LLM provider'.",
-            "import failed",
-        )
-
-        def _scoped_key_env(name: str) -> str:
-            return os.getenv(name) or ""
-
-    if has_usable_secret(_scoped_key_env("OPENAI_API_KEY")) or has_usable_secret(
-        _scoped_key_env("OPENROUTER_API_KEY")
-    ):
+    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
         return "openrouter"
 
     # Auto-detect an OpenRouter credential added via `hermes auth add openrouter`
@@ -2245,7 +2231,7 @@ def resolve_provider(
         if pid in {"copilot", "lmstudio"}:
             continue
         for env_var in pconfig.api_key_env_vars:
-            if has_usable_secret(_scoped_key_env(env_var)):
+            if has_usable_secret(os.getenv(env_var, "")):
                 # An exported API key now wins over a logged-in OAuth provider
                 # (the #29285 fix). Surface that so a user who deliberately uses
                 # OAuth but has a stale key in ~/.hermes/.env isn't silently
@@ -7117,12 +7103,15 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
-def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
-    """Status snapshot for providers that run a local subprocess."""
-    pconfig = PROVIDER_REGISTRY.get(provider_id)
-    if not pconfig or pconfig.auth_type != "external_process":
-        return {"configured": False}
+def _external_process_launch(provider_id: str) -> tuple[str, list[str]]:
+    """Return (command, args) for an external-process provider.
 
+    Copilot ACP keeps the existing HERMES_COPILOT_ACP_* / COPILOT_CLI_PATH
+    contract. Cursor ACP launches `cursor-agent acp` and does not reuse
+    those Copilot-only env vars.
+    """
+    if provider_id == "cursor-acp":
+        return "cursor-agent", ["acp"]
     command = (
         os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
         or os.getenv("COPILOT_CLI_PATH", "").strip()
@@ -7130,6 +7119,16 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     )
     raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
     args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    return command, args
+
+
+def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
+    """Status snapshot for providers that run a local subprocess."""
+    pconfig = PROVIDER_REGISTRY.get(provider_id)
+    if not pconfig or pconfig.auth_type != "external_process":
+        return {"configured": False}
+
+    command, args = _external_process_launch(provider_id)
     base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
@@ -7164,7 +7163,7 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_qwen_auth_status()
     if target == "minimax-oauth":
         return get_minimax_oauth_auth_status()
-    if target == "copilot-acp":
+    if target in {"copilot-acp", "cursor-acp"}:
         return get_external_process_provider_status(target)
     if target == "azure-foundry":
         return _get_azure_foundry_auth_status()
@@ -7354,15 +7353,16 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command, args = _external_process_launch(provider_id)
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
+        if provider_id == "cursor-acp":
+            raise AuthError(
+                f"Could not find the Cursor CLI command '{command}'. "
+                "Install cursor-agent and run `cursor-agent login`.",
+                provider=provider_id,
+                code="missing_cursor_cli",
+            )
         raise AuthError(
             f"Could not find the Copilot CLI command '{command}'. "
             "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
@@ -7372,7 +7372,7 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": provider_id,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

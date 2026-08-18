@@ -171,7 +171,7 @@ def test_main_turn_llm_call_stays_managed(relay_turn):
         host.relay.llm.execute = original_execute
 
     assert out is not None
-    assert "openai.chat_completions" in managed_llm_names
+    assert "main-prov" in managed_llm_names
 
 
 def test_guard_resets_after_managed_callback_returns(relay_turn):
@@ -219,7 +219,7 @@ def test_guard_resets_after_managed_callback_returns(relay_turn):
     finally:
         host.relay.llm.execute = original_execute
 
-    assert "openai.chat_completions" in managed_llm_names
+    assert "after-prov" in managed_llm_names
 
 
 def test_resolve_execution_context_bypasses_inside_guard(relay_turn):

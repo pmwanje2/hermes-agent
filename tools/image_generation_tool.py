@@ -13,10 +13,8 @@ Architecture:
   aspect_ratio) into the model-specific payload and filters to the
   ``supports`` whitelist so models never receive rejected keys.
 - Upscaling via FAL's Clarity Upscaler is gated per-model via the ``upscale``
-  flag — OFF by default for every model. Clarity is an SD1.5 creative
-  tile-diffusion enhancer (creativity 0.35 redraws content); chained by
-  default it mangled GPT Image 2 / Ideogram text rendering, CJK, and faces
-  (Aug 2026 quality regression). Upscaling is strictly per-call opt-in.
+  flag — on for FLUX 2 Pro (backward-compat), off for all faster/newer models
+  where upscaling would either hurt latency or add marginal quality.
 
 Pricing shown in UI strings is as-of the initial commit; we accept drift and
 update when it's noticed.
@@ -95,8 +93,6 @@ logger = logging.getLogger(__name__)
 # rejected parameters (each FAL model rejects unknown keys differently).
 #
 # ``upscale`` controls whether to chain Clarity Upscaler after generation.
-# Policy (Aug 2026): False everywhere — the default-on experiment degraded
-# output quality (Clarity redraws content). Opt-in per call only.
 
 FAL_MODELS: Dict[str, Dict[str, Any]] = {
     "fal-ai/flux-2/klein/9b": {
@@ -119,7 +115,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "num_inference_steps", "seed",
             "output_format", "enable_safety_checker",
         },
-        "upscale": False,
+        "upscale": True,
         # Image-to-image / editing: FLUX.2 [klein] 9B edit endpoint takes
         # `image_urls` (list). Natural-language edits, multi-ref.
         "edit_endpoint": "fal-ai/flux-2/klein/9b/edit",
@@ -154,7 +150,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "num_images", "output_format", "enable_safety_checker",
             "safety_tolerance", "sync_mode", "seed",
         },
-        "upscale": False,  # opt-in only (was default-on pre-Aug 2026)
+        "upscale": True,   # Backward-compat: current default behavior.
         # Edit endpoint accepts up to 9 reference images.
         "edit_endpoint": "fal-ai/flux-2-pro/edit",
         "edit_supports": {
@@ -187,7 +183,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "seed", "output_format", "enable_safety_checker",
             "enable_prompt_expansion",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "fal-ai/nano-banana-pro": {
         "display": "Nano Banana Pro (Gemini 3 Pro Image)",
@@ -213,7 +209,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "safety_tolerance", "seed", "sync_mode", "resolution",
             "enable_web_search", "limit_generations",
         },
-        "upscale": False,
+        "upscale": True,
         # Nano Banana Pro edit (Gemini 3 Pro Image): natural-language edits
         # with up to 2 reference images via `image_urls`.
         "edit_endpoint": "fal-ai/nano-banana-pro/edit",
@@ -248,7 +244,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "resolution", "enable_web_search", "limit_generations",
             "thinking_level",
         },
-        "upscale": False,
+        "upscale": True,
         "edit_endpoint": "fal-ai/nano-banana-2/edit",
         "edit_supports": {
             "prompt", "image_urls", "aspect_ratio", "num_images",
@@ -280,7 +276,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "quality", "num_images", "output_format",
             "background", "sync_mode",
         },
-        "upscale": False,
+        "upscale": True,
         # Edit endpoint: high-fidelity edits preserving composition/lighting.
         "edit_endpoint": "fal-ai/gpt-image-1.5/edit",
         "edit_supports": {
@@ -319,7 +315,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             # openai_api_key (BYOK) intentionally omitted — all users go
             # through the shared FAL billing path.
         },
-        "upscale": False,
+        "upscale": True,
         # GPT Image 2 edit endpoint lives under the OpenAI namespace on FAL
         # (NOT fal-ai/). Takes `image_urls` (list) + optional mask. We don't
         # send `image_size` on edit so the model auto-infers from input.
@@ -350,7 +346,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "rendering_speed", "expand_prompt",
             "style", "seed",
         },
-        "upscale": False,
+        "upscale": True,
         # Ideogram V3 edit endpoint takes `image_urls` (list).
         "edit_endpoint": "fal-ai/ideogram/v3/edit",
         "edit_supports": {
@@ -378,7 +374,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "enable_safety_checker",
             "colors", "background_color",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "fal-ai/qwen-image": {
         "display": "Qwen Image",
@@ -402,7 +398,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "num_inference_steps", "guidance_scale",
             "num_images", "output_format", "acceleration", "seed", "sync_mode",
         },
-        "upscale": False,
+        "upscale": True,
         # Qwen edit uses the Qwen Image 2.0 Pro editing endpoint, which takes
         # `image_urls` (list) + natural-language edit instructions.
         "edit_endpoint": "fal-ai/qwen-image-2/pro/edit",
@@ -433,7 +429,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "aspect_ratio", "creativity", "seed",
             "image_style_references",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "fal-ai/krea/v2/large/text-to-image": {
         "display": "Krea 2 Large",
@@ -535,7 +531,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "expansion_model", "num_images",
             "seed", "sync_mode", "enable_safety_checker", "output_format",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "ideogram/v4/fast": {
         "display": "Ideogram V4 (Fast)",
@@ -556,7 +552,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "expansion_model", "rendering_speed",
             "num_images", "seed", "sync_mode",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "alibaba/qwen-image-3/text-to-image": {
         "display": "Qwen Image 3",
@@ -580,7 +576,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "seed", "sync_mode", "output_format",
             "enable_prompt_expansion", "enable_safety_checker",
         },
-        "upscale": False,
+        "upscale": True,
         # Qwen Image 3 edit: 1-3 reference images, identity-preserving edits.
         "edit_endpoint": "alibaba/qwen-image-3/edit",
         "edit_supports": {
@@ -609,7 +605,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "aspect_ratio", "num_images", "output_format",
             "sync_mode",
         },
-        "upscale": False,
+        "upscale": True,
     },
     "google/nano-banana-2-lite": {
         "display": "Nano Banana 2 Lite",
@@ -632,7 +628,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "output_format", "safety_tolerance", "sync_mode",
             "system_prompt", "limit_generations", "thinking_level",
         },
-        "upscale": False,
+        "upscale": True,
         # Fast multi-turn local edits with reference images via `image_urls`.
         "edit_endpoint": "google/nano-banana-2-lite/edit",
         "edit_supports": {
@@ -660,7 +656,7 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
             "prompt", "image_size", "enable_safety_checker",
             "colors", "background_color",
         },
-        "upscale": False,
+        "upscale": True,
     },
 }
 
@@ -724,46 +720,6 @@ def _get_managed_fal_client(managed_gateway):
         )
         _managed_fal_client_config = client_config
         return _managed_fal_client
-
-
-class ImageGenerationInterrupted(Exception):
-    """Raised when the user interrupts while a FAL job is in flight."""
-
-
-def _wait_fal_result(handler, *, poll_seconds: float = 0.5):
-    """Interrupt-aware replacement for a blind ``handler.get()``.
-
-    ``handler.get()`` blocks inside the FAL SDK until the remote job
-    finishes — a 30-60s window where a user interrupt was previously
-    invisible (the reported symptom: redirects queued behind a running
-    generation). Run the blocking get on a daemon worker and poll the
-    per-thread interrupt bit between join slices; on interrupt, abandon
-    the worker (daemon thread, remote job keeps running server-side but
-    we stop waiting) and raise ``ImageGenerationInterrupted``.
-    """
-    from tools.interrupt import is_interrupted
-
-    result_box: list = []
-    error_box: list = []
-
-    def _get():
-        try:
-            result_box.append(handler.get())
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller thread
-            error_box.append(exc)
-
-    worker = threading.Thread(target=_get, daemon=True, name="fal-result-wait")
-    worker.start()
-    while worker.is_alive():
-        if is_interrupted():
-            raise ImageGenerationInterrupted(
-                "Image generation interrupted by user — abandoned the "
-                "in-flight FAL job."
-            )
-        worker.join(timeout=poll_seconds)
-    if error_box:
-        raise error_box[0]
-    return result_box[0] if result_box else None
 
 
 def _submit_fal_request(model: str, arguments: Dict[str, Any]):
@@ -978,7 +934,7 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         }
 
         handler = _submit_fal_request(UPSCALER_MODEL, arguments=upscaler_arguments)
-        result = _wait_fal_result(handler)
+        result = handler.get()
 
         if result and "image" in result:
             upscaled_image = result["image"]
@@ -997,10 +953,6 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         logger.error("Upscaler returned invalid response")
         return None
 
-    except ImageGenerationInterrupted:
-        # Propagate: the user interrupt must not degrade into a silent
-        # "upscale failed, use original" fallback that keeps the turn alive.
-        raise
     except Exception as e:
         logger.error("Error upscaling image: %s", e, exc_info=True)
         return None
@@ -1248,7 +1200,7 @@ def image_generate_tool(
             )
 
         handler = _submit_fal_request(endpoint, arguments=arguments)
-        result = _wait_fal_result(handler)
+        result = handler.get()
 
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
 
@@ -1514,12 +1466,12 @@ IMAGE_GENERATE_SCHEMA = {
             "upscale": {
                 "type": "boolean",
                 "description": (
-                    "Optional post-generation high-resolution pass (~2x, "
-                    "extra cost/latency). Off by default for every model — "
-                    "pass true to opt in. The upscaler is a creative "
-                    "enhancer and can alter fine detail (rendered text, "
-                    "faces), so only use it when resolution matters more "
-                    "than fidelity."
+                    "Optional override for the high-resolution pass. Models "
+                    "with sub-2MP native output upscale automatically (~2x, "
+                    "extra cost/latency); pass false for a faster/cheaper "
+                    "draft at native resolution, or true to force the pass "
+                    "on native hi-res models and image edits. Omit to keep "
+                    "the per-model default."
                 ),
             },
         },

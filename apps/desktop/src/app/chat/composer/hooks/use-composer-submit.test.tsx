@@ -79,7 +79,7 @@ describe('useComposerSubmit busy-turn routing', () => {
     vi.restoreAllMocks()
   })
 
-  it('treats a payload mid-turn as send (steer), not stop', async () => {
+  it('steers a plain-text follow-up instead of queueing or stopping', async () => {
     const { hook, onCancel, onSteer, onSubmit, queueCurrentDraft } = renderSubmitHook({
       busy: true,
       text: 'change course'

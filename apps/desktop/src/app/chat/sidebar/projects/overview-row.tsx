@@ -125,7 +125,6 @@ export function ProjectOverviewRow({
         </>
       }
       className={cn(dragging && 'cursor-grabbing bg-(--ui-sidebar-surface-background)')}
-      data-glass-opaque={dragging ? '' : undefined}
       label={
         <SidebarRowLink
           aria-label={s.projects.enter(project.label)}

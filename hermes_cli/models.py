@@ -125,8 +125,6 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("stepfun/step-3.7-flash",                 ""),
     # NVIDIA
     ("nvidia/nemotron-3-super-120b-a12b",      ""),
-    # Meta
-    ("meta/muse-spark-1.2",                    ""),
     # Sakana
     ("sakana/fugu-ultra",                      ""),
     # OpenRouter routers
@@ -338,6 +336,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
         "copilot-acp",
+    ],
+    "cursor-acp": [
+        "gpt-5.6-sol-high",
+        "gemini-3.7-flash-high",
     ],
     "copilot": [
         "gpt-5.4",
@@ -1168,6 +1170,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models via build.nvidia.com or local NIM)"),
     ProviderEntry("copilot",        "GitHub Copilot",           "GitHub Copilot (Uses GITHUB_TOKEN or gh auth token)"),
     ProviderEntry("copilot-acp",    "GitHub Copilot ACP",       "GitHub Copilot ACP (Spawns copilot --acp --stdio)"),
+    ProviderEntry("cursor-acp",     "Cursor ACP",               "Cursor ACP (Spawns cursor-agent acp)"),
     ProviderEntry("huggingface",    "Hugging Face",             "Hugging Face Inference Providers"),
     ProviderEntry("gemini",         "Google AI Studio",         "Google AI Studio (Native Gemini API)"),
     ProviderEntry("vertex",         "Google Vertex AI",         "Google Vertex AI (Gemini via GCP; OAuth2 service account or ADC, GCP billing/quotas)"),
@@ -1331,6 +1334,8 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "cursor-acp-agent": "cursor-acp",
+    "cursor-agent-acp": "cursor-acp",
     "google": "gemini",
     "google-gemini": "gemini",
     "google-ai-studio": "gemini",
@@ -3163,6 +3168,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             pass
         if normalized == "copilot-acp":
             return list(_PROVIDER_MODELS.get("copilot", []))
+    if normalized == "cursor-acp":
+        return list(_PROVIDER_MODELS.get("cursor-acp", []))
     if normalized == "nous":
         # Try live Nous Portal /models endpoint
         try:

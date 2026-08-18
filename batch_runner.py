@@ -1246,21 +1246,21 @@ def main(
     # Validate required arguments
     if not dataset_file:
         print("❌ Error: --dataset_file is required")
-        raise SystemExit(1)
-
+        return
+    
     if not batch_size or batch_size < 1:
         print("❌ Error: --batch_size must be a positive integer")
-        raise SystemExit(1)
-
+        return
+    
     if not run_name:
         print("❌ Error: --run_name is required")
-        raise SystemExit(1)
-
+        return
+    
     # Parse provider preferences (comma-separated strings to lists)
     providers_allowed_list = [p.strip() for p in providers_allowed.split(",")] if providers_allowed else None
     providers_ignored_list = [p.strip() for p in providers_ignored.split(",")] if providers_ignored else None
     providers_order_list = [p.strip() for p in providers_order.split(",")] if providers_order else None
-
+    
     # Build reasoning_config from CLI flags
     # --reasoning_disabled takes priority, then --reasoning_effort, then default (medium)
     reasoning_config = None
@@ -1273,10 +1273,10 @@ def main(
         valid_efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
         if reasoning_effort not in valid_efforts:
             print(f"❌ Error: --reasoning_effort must be one of: {', '.join(valid_efforts)}")
-            raise SystemExit(1)
+            return
         reasoning_config = {"enabled": True, "effort": reasoning_effort}
         print(f"🧠 Reasoning effort: {reasoning_effort}")
-
+    
     # Load prefill messages from JSON file if provided
     prefill_messages = None
     if prefill_messages_file:
@@ -1285,12 +1285,12 @@ def main(
                 prefill_messages = json.load(f)
             if not isinstance(prefill_messages, list):
                 print("❌ Error: prefill_messages_file must contain a JSON array of messages")
-                raise SystemExit(1)
+                return
             print(f"💬 Loaded {len(prefill_messages)} prefill messages from {prefill_messages_file}")
         except Exception as e:
             print(f"❌ Error loading prefill messages: {e}")
-            raise SystemExit(1)
-
+            return
+    
     # Initialize and run batch runner
     try:
         runner = BatchRunner(
@@ -1317,12 +1317,12 @@ def main(
         )
 
         runner.run(resume=resume)
-
+    
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
         if verbose:
             traceback.print_exc()
-        raise SystemExit(1)
+        return 1
 
 
 if __name__ == "__main__":

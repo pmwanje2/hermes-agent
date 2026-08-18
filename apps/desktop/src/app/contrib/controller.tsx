@@ -6,7 +6,6 @@ import { SessionDraftTitle } from '@/app/chat/session-draft-title'
 import { SessionStatusDot } from '@/app/chat/session-status-dot'
 import { PALETTE_AREA, type PaletteContribution, paletteToggle } from '@/app/command-palette/contrib'
 import { type StatusbarItem } from '@/app/shell/statusbar-controls'
-import { InlinePreviewDirective } from '@/components/assistant-ui/inline-preview-directive'
 import { IdleMount } from '@/components/idle-mount'
 import { $layoutEditMode, toggleLayoutEditMode } from '@/components/pane-shell/edit-mode'
 import { allPaneIds, group, groupLeafIds, split } from '@/components/pane-shell/tree/model'
@@ -41,7 +40,6 @@ import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import { NEW_SESSION_TITLE, sessionTitle as storedSessionTitle } from '@/lib/chat-runtime'
 import { Download, FileText, LayoutDashboard, PanelBottom, Terminal, Upload, Zap } from '@/lib/icons'
 import { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
-import { TRANSCRIPT_DIRECTIVE_AREA, type TranscriptDirectiveContribution } from '@/lib/transcript-directives'
 import { setYoloEnabled } from '@/lib/yolo-session'
 import { pruneComposerPopoutZones } from '@/store/composer-popout'
 import {
@@ -60,7 +58,6 @@ import { runExportProfileFlow, runImportProfileFlow } from '@/store/profile-shar
 import { $reviewOpen, closeReview, openReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd, $selectedStoredSessionId, $sessions, $yoloActive, sessionMatchesStoredId } from '@/store/session'
 import { watchSessionPins } from '@/store/session-pin-sync'
-import { watchUnreadWriteGuard } from '@/store/session-unread-remote'
 import { $statusbarVisible } from '@/store/statusbar-prefs'
 import { isHudWindow } from '@/store/windows'
 
@@ -276,19 +273,6 @@ registry.registerMany([
       run: () => void discoverRuntimePlugins()
     } satisfies PaletteContribution
   },
-  // The core `::preview{file="…"}` transcript directive — the model (or a
-  // skill) renders a workspace HTML file LIVE inside its own message
-  // (sandboxed srcdoc iframe; falls back to the classic preview card for
-  // non-HTML targets and remote gateways). Also the reference consumer for
-  // the `transcript.directives` area plugins register into.
-  {
-    id: 'transcript.preview',
-    area: TRANSCRIPT_DIRECTIVE_AREA,
-    data: {
-      name: 'preview',
-      render: ({ attrs, streaming }) => <InlinePreviewDirective attrs={attrs} streaming={streaming} />
-    } satisfies TranscriptDirectiveContribution
-  },
   {
     id: 'layout.reset',
     area: PALETTE_AREA,
@@ -442,9 +426,6 @@ $layoutTree.subscribe(tree => {
 // Mirror sidebar pins into the backend keep-flag so the auto-archive sweep
 // never hides a pinned chat (and pre-existing pins migrate transparently).
 watchSessionPins()
-
-// Release unread-write guards once a list page confirms the value we wrote.
-watchUnreadWriteGuard()
 
 // The main tab reads as its SESSION (the loaded title, "New session" on a
 // fresh draft) — a stack of main + tiles is then just a row of session names.
@@ -747,12 +728,6 @@ export function ContribController() {
         <ShellContextMenu>
           <div
             className="flex h-screen min-h-0 w-screen flex-col bg-(--ui-bg-chrome) text-(--ui-text-primary)"
-            // Window-glass hook: this div and the sidebar-wrapper above it are
-            // the app shell's two full-window opaque painters; the
-            // [data-hermes-glass] rules in styles.css clear them so the tint
-            // painted by <body> is the only thing between the page and the
-            // vibrancy material.
-            data-contrib-shell=""
             style={{ '--titlebar-height': '0px' } as CSSProperties}
           >
             {/* Title bar: fixed chrome outside the grid, composable via slots.
@@ -797,10 +772,7 @@ export function ContribController() {
                 className="pointer-events-auto absolute z-10 flex w-max items-center gap-2 [-webkit-app-region:no-drag]"
                 style={{
                   right:
-                    // Five static cluster buttons: four systemTools plus the
-                    // always-present right-sidebar toggle (titlebar-controls.tsx).
-                    // Keep in sync with wiring.tsx's SYSTEM_TOOL_COUNT.
-                    'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 5 * var(--titlebar-control-size, 24px) + 0.5rem))'
+                    'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 4 * var(--titlebar-control-size, 24px) + 0.5rem))'
                 }}
               />
             </div>

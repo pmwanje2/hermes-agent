@@ -134,11 +134,6 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     # providers.is_official_openai_host for the spoof-rejection contract.
     if is_official_openai_host(base_url):
         return "codex_responses"
-    # Meta Model API: prompt caching only on Responses API (0% on
-    # chat/completions vs 93-99% on /responses with retention). Exact
-    # hostname per #32243.
-    if hostname == "api.meta.ai":
-        return "codex_responses"
     if hostname == "api.actual.inc":
         return "codex_responses"
     # Direct native Anthropic host: realign with providers.determine_api_mode,
@@ -190,7 +185,6 @@ def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> 
     Responses path after upgrades or /reset.
     """
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-    # Note: api.meta.ai is handled by _detect_api_mode_for_url (returns codex_responses), so the suppression guard below does not fire for Meta.
     detected_mode = _detect_api_mode_for_url(base_url)
 
     if configured_mode == "codex_responses" and detected_mode != "codex_responses":
@@ -652,18 +646,6 @@ def _try_resolve_from_custom_pool(
         pool_api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         if not pool_api_key:
             return None
-        if not has_usable_secret(pool_api_key) and _loopback_hostname(base_url_hostname(base_url)):
-            # Legacy configs commonly used short/placeholder keys ('123',
-            # 'm', ...) for local no-auth services like Ollama -- fine for
-            # the endpoint itself, but has_usable_secret's 4-char floor
-            # (added after these configs were written) now rejects them
-            # here with no migration path. Every OTHER resolution path in
-            # this file already substitutes "no-key-required" for a
-            # loopback endpoint with no usable secret (the config-based
-            # custom_providers fallback a few hundred lines below, and the
-            # "actual" provider's local-offline exemption further down) --
-            # this pool path was the one gap (issue #86864).
-            pool_api_key = "no-key-required"
         return {
             "provider": provider_label,
             "api_mode": api_mode_override or _detect_api_mode_for_url(base_url) or "chat_completions",
@@ -781,13 +763,6 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     if isinstance(extra_body, dict):
                         result["extra_body"] = dict(extra_body)
                     _lift_extra_headers(entry, result)
-                    # Command that PRINTS a credential, for gateways issuing
-                    # short-lived bearers instead of static keys. Propagated
-                    # raw; wrapped in a per-request token provider at
-                    # resolution.
-                    key_cmd = str(entry.get("key_cmd", "") or "").strip()
-                    if key_cmd:
-                        result["key_cmd"] = key_cmd
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -1195,22 +1170,6 @@ def _resolve_named_custom_runtime(
         _host_derived_api_key(base_url),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
-
-    # A ``key_cmd`` credential is minted per request rather than resolved once:
-    # gateways that issue short-lived bearers would otherwise go stale
-    # mid-session and 401. Both wire clients already accept a callable api_key
-    # (the Entra ID contract) and invoke it per request. An explicit --api-key
-    # still wins — it is the one-off recovery escape hatch.
-    key_cmd = str(custom_provider.get("key_cmd", "") or "").strip()
-    if key_cmd and not has_usable_secret((explicit_api_key or "").strip()):
-        from agent.command_token_source import build_command_token_provider
-
-        token_provider = build_command_token_provider(
-            key_cmd,
-            str(custom_provider.get("name", requested_provider) or "custom"),
-        )
-        if token_provider is not None:
-            api_key = token_provider
 
     result = {
         "provider": "custom",
@@ -2084,10 +2043,10 @@ def resolve_runtime_provider(
                 "requested_provider": requested_provider,
             }
 
-    if provider == "copilot-acp":
+    if provider in {"copilot-acp", "cursor-acp"}:
         creds = resolve_external_process_provider_credentials(provider)
         return {
-            "provider": "copilot-acp",
+            "provider": provider,
             "api_mode": "chat_completions",
             "base_url": creds.get("base_url", "").rstrip("/"),
             "api_key": creds.get("api_key", ""),

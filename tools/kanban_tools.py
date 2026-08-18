@@ -534,6 +534,7 @@ def _handle_show(args: dict, **kw) -> str:
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
             children = kb.child_ids(conn, tid)
+            receipt = kb.latest_oracle_receipt(conn, tid)
 
             def _task_dict(t):
                 return {
@@ -549,6 +550,11 @@ def _handle_show(args: dict, **kw) -> str:
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    "oracle_kind": t.oracle_kind,
+                    "oracle_cmd": t.oracle_cmd,
+                    "oracle_timeout_s": t.oracle_timeout_s,
+                    "oracle_image": t.oracle_image,
+                    "oracle_waiver_reason": t.oracle_waiver_reason,
                 }
 
             def _run_dict(r):
@@ -575,6 +581,7 @@ def _handle_show(args: dict, **kw) -> str:
                     for e in events[-50:]   # cap; full log via CLI
                 ],
                 "runs": [_run_dict(r) for r in runs],
+                "latest_oracle_receipt": receipt,
                 # Also surface the worker's own context block so the
                 # agent can include it directly if it wants. This is
                 # the same string build_worker_context returns to the
@@ -1413,6 +1420,11 @@ def _handle_create(args: dict, **kw) -> str:
     provider_override = args.get("provider")
     if provider_override and not model_override:
         return tool_error("'provider' requires 'model' to be set as well")
+    oracle_kind = args.get("oracle_kind")
+    oracle_cmd = args.get("oracle_cmd")
+    oracle_timeout_s = args.get("oracle_timeout_s")
+    oracle_image = args.get("oracle_image")
+    oracle_waiver_reason = args.get("oracle_waiver_reason")
     if isinstance(parents, str):
         parents = [parents]
     if not isinstance(parents, (list, tuple)):
@@ -1461,6 +1473,14 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                board=board,
+                oracle_kind=oracle_kind,
+                oracle_cmd=oracle_cmd,
+                oracle_timeout_s=(
+                    int(oracle_timeout_s) if oracle_timeout_s is not None else None
+                ),
+                oracle_image=oracle_image,
+                oracle_waiver_reason=oracle_waiver_reason,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -2301,6 +2321,44 @@ KANBAN_CREATE_SCHEMA = {
                     "provider — a model name alone is resolved against "
                     "the profile's provider and will fail if it belongs "
                     "to a different one. Requires 'model'."
+                ),
+            },
+            "oracle_kind": {
+                "type": "string",
+                "enum": ["jest", "tsc", "shell", "none"],
+                "description": (
+                    "Optional Card Acceptance Oracle kind. When set, "
+                    "complete_task records a receipt (advisory / "
+                    "best-effort; Phase 1 does not refuse completion). "
+                    "Omit for today's behaviour. A worker can write "
+                    "the receipt table directly."
+                ),
+            },
+            "oracle_cmd": {
+                "type": "string",
+                "description": (
+                    "Oracle command or test path. Required for "
+                    "jest/tsc/shell. Ignored when oracle_kind is omitted."
+                ),
+            },
+            "oracle_timeout_s": {
+                "type": "integer",
+                "description": (
+                    "Oracle timeout in seconds (default 900)."
+                ),
+            },
+            "oracle_image": {
+                "type": "string",
+                "description": (
+                    "Container image for the oracle runner. Defaults "
+                    "to the board's kanban.oracle_image config."
+                ),
+            },
+            "oracle_waiver_reason": {
+                "type": "string",
+                "description": (
+                    "Required when oracle_kind is 'none': why this "
+                    "card has no executable oracle. Visible on show."
                 ),
             },
             "board": _board_schema_prop(),

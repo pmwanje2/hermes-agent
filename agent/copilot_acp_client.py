@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -72,60 +73,6 @@ def _resolve_args() -> list[str]:
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)
-
-
-# Probe verdicts cached per binary path so repeated prompts against a
-# CLI that supports --acp pay the ~50ms --help cost exactly once per
-# process. Only definitive verdicts (True/False) are cached; an
-# inconclusive probe (binary missing, --help crashed or timed out) is
-# not cached so a CLI installed mid-session is picked up.
-_ACP_PROBE_CACHE: dict[str, bool] = {}
-
-
-def _acp_supported(command: str, args: list[str]) -> bool | None:
-    """Tri-state probe: does ``command`` accept the ACP args we'd pass?
-
-    Different CLI versions support different transports. The GitHub
-    Copilot CLI (`@github/copilot`, late 2025+) ships with ``--acp``;
-    older releases (and Claude Code v2.x as of Aug 2026) do not.
-    Spawning a CLI that doesn't recognize the flag silently exits
-    with code 1 and ``error: unknown option '--acp'`` on stderr,
-    after which every delegate_task call hangs the parent for
-    ``child_timeout_seconds`` (default 600s) waiting for stdout
-    that never arrives.
-
-    Returns:
-      - ``True``  — help text advertises ``--acp``; safe to spawn.
-      - ``False`` — help ran cleanly but ``--acp`` is absent; spawning
-        would hang, so the caller should fast-fail with a clear error.
-      - ``None``  — inconclusive (binary missing, --help failed or
-        timed out). The caller must fall through to the normal spawn
-        path, which surfaces the existing "Could not start Copilot ACP
-        command" error with full context.
-
-    Only probes when ``--acp`` is actually among ``args``: a custom
-    HERMES_COPILOT_ACP_ARGS transport is the operator's business.
-    """
-    if "--acp" not in args:
-        return True
-    cached = _ACP_PROBE_CACHE.get(command)
-    if cached is not None:
-        return cached
-    try:
-        probe = subprocess.run(
-            [command, "--help"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if probe.returncode != 0:
-        # --help itself failed; can't tell anything about --acp.
-        return None
-    # Match ``--acp`` as a flag in the help text; tolerate spacing and
-    # variants like ``[--acp]``.
-    verdict = bool(re.search(r"(?:^|[\s\[])--acp(?:[\s=\],]|$)", probe.stdout, re.MULTILINE))
-    _ACP_PROBE_CACHE[command] = verdict
-    return verdict
 
 
 def _resolve_home_dir() -> str:
@@ -556,28 +503,24 @@ class CopilotACPClient:
         return completion
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
-        # Fast-fail when the CLI doesn't support the ACP args we'd pass.
-        # Without this guard, a CLI like Claude Code v2.x exits with
-        # ``error: unknown option '--acp'`` immediately, then the parent
-        # ACP loop waits the full ``child_timeout_seconds`` (default 600s)
-        # for stdout that never arrives. The probe costs ~50ms and turns
-        # a 600s silent hang into a 280ms clear error.
-        # ``None`` (inconclusive probe — e.g. binary missing) falls
-        # through to the spawn below, which raises the established
-        # "Could not start Copilot ACP command" error.
-        if _acp_supported(self._acp_command, self._acp_args) is False:
-            preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
+        # Reaped scratch workspaces vanish between construction and spawn.
+        # Check immediately before Popen and hard-fail — do not silently
+        # retarget os.getcwd() into an unrelated directory. Cwd is checked
+        # first so a vanished seat workspace is named even when the host
+        # CLI would also fail its probe. (Sibling of the cursor-acp fix;
+        # kanban t_a702a042 / t_6337dcce.)
+        if not Path(self._acp_cwd).is_dir():
             raise RuntimeError(
-                f"ACP transport not supported by '{self._acp_command}': "
-                f"`{preview}` is rejected as an unknown option. "
-                f"This usually means the CLI is an older release (e.g. "
-                f"Claude Code v2.x) or a different tool than expected. "
-                f"Either install a CLI that ships with --acp support "
-                f"(e.g. `@github/copilot` late 2025+), or set "
-                f"HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS "
-                f"to a working pair."
+                f"Copilot ACP working directory does not exist: {self._acp_cwd}. "
+                "The directory may have been reaped (scratch workspaces are deleted "
+                "when a kanban card completes). Pass a still-existing acp_cwd; "
+                "refusing to fall back to another directory."
             )
-
+        if shutil.which(self._acp_command) is None and not Path(self._acp_command).exists():
+            raise RuntimeError(
+                f"Could not start Copilot ACP command '{self._acp_command}'. "
+                "Install the Copilot CLI and authenticate, then retry."
+            )
         try:
             # Hide the console the CLI child would otherwise flash on Windows
             # (#56747). Hide-only — stdio pipes stay intact for the ACP wire.

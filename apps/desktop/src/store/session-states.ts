@@ -16,7 +16,6 @@
  * itself here as the delegate so tile UI stays dependency-light.
  */
 
-import { registryBackendScopeKey } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import type { ClientSessionState } from '@/app/types'
@@ -34,20 +33,16 @@ import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $activeGatewayProfile, normalizeProfileKey } from './profile'
-import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
 import {
   $activeSessionId,
-  $lastReadAtBySessionId,
   $selectedStoredSessionId,
   $sessions,
-  clearReadBaseline,
+  $unreadFinishedSessionIds,
   lineageAliases,
-  markSessionRead,
   sessionMatchesStoredId,
   setActiveSessionStoredIdRotation,
   setSessions
 } from './session'
-import { ackStoredSessionId, markSessionUnreadFinished } from './session-unread'
 import { isSecondaryWindow } from './windows'
 
 // ---------------------------------------------------------------------------
@@ -55,45 +50,6 @@ import { isSecondaryWindow } from './windows'
 // ---------------------------------------------------------------------------
 
 export const $sessionStates = atom<Record<string, ClientSessionState>>({})
-
-// ---------------------------------------------------------------------------
-// Event-source scopes: which registry connection's socket delivered a runtime
-// session's events. Working/attention membership alone is profile-blind — two
-// connected gateways can both expose a 'default' profile, so the gateway
-// keep-set (pruneSecondaryGateways) must key live work by the composite
-// (connectionId, profile) scope, not the bare profile name. Recorded at
-// event fan-in (use-gateway-boot); local/primary events carry no connectionId
-// and record nothing, so single-source behavior is untouched.
-// ---------------------------------------------------------------------------
-
-const sessionScopeByRuntimeId = new Map<string, string>()
-
-export function recordSessionEventScope(event: { connectionId?: string; profile?: string; session_id?: string }): void {
-  if (event.session_id && event.connectionId) {
-    sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(event.connectionId, event.profile))
-  }
-}
-
-/** Composite scopes of registry-sourced sessions that are live (busy or
- * waiting on input) — the (connectionId, profile) half of the gateway
- * keep-set. Local-source live work keeps flowing through profile names. */
-export function liveSessionScopes(): Set<string> {
-  const scopes = new Set<string>()
-
-  for (const [runtimeId, state] of Object.entries($sessionStates.get())) {
-    if (!state || (!state.busy && !state.needsInput)) {
-      continue
-    }
-
-    const scope = sessionScopeByRuntimeId.get(runtimeId)
-
-    if (scope) {
-      scopes.add(scope)
-    }
-  }
-
-  return scopes
-}
 
 // Stored session ids whose authoritative state is still busy, but whose
 // runtime has produced no state publish for the watchdog window. Silence is
@@ -223,27 +179,14 @@ function handleTransition(previous: ClientSessionState | null, next: ClientSessi
 
   if (next.busy && !wasWorking) {
     clearSettled(storedId)
-    // A NEW turn is starting: the read baseline guarded the PREVIOUS
-    // completion's re-asserts. Dropping it here means this turn's finish
-    // re-lights even if it lands within the same millisecond as the last
-    // read (same-tick submit → finish in tests and fast local models).
-    clearReadBaseline(storedId)
   } else if (!next.busy && wasWorking) {
     markSettled(storedId)
 
-    // FOCUSED, not selected: a session finishing in the tile the user is
-    // watching is already seen, and a tile is never the primary selection.
-    if (storedId !== $focusedStoredSessionId.get()) {
-      // Re-light only genuinely new completions: if the user already viewed
-      // this session (or its family) at or after this settle moment, a
-      // re-assert of the same completion must not re-arm the dot. `-1` for
-      // "never read" (not `0`) so fake-timer tests pinned to t=0 still light.
-      const lastReadAt = $lastReadAtBySessionId.get()[storedId] ?? -1
+    if (storedId !== $selectedStoredSessionId.get()) {
+      const cur = $unreadFinishedSessionIds.get()
 
-      if (Date.now() > lastReadAt) {
-        // Flags the transient atom AND persists a marker, so the green dot
-        // survives an app restart (see session-unread.ts).
-        markSessionUnreadFinished(storedId)
+      if (!cur.includes(storedId)) {
+        $unreadFinishedSessionIds.set([...cur, storedId])
       }
     }
   }
@@ -341,8 +284,6 @@ export function dropSessionState(runtimeId: string) {
   // a just-finished session's row survives merge eviction even if its tile or
   // cached runtime is dropped in the meantime.
   clearWatchdog(runtimeId)
-  clearSessionProviderWait(runtimeId)
-  sessionScopeByRuntimeId.delete(runtimeId)
 
   const current = $sessionStates.get()
   setSessionStalled(current[runtimeId]?.storedSessionId, false)
@@ -367,8 +308,6 @@ export function clearAllSessionStates() {
 
   sessionWatchdogTimers.clear()
   settledExpiry.clear()
-  clearAllProviderWaits()
-  sessionScopeByRuntimeId.clear()
   $stalledSessionIds.set([])
   $sessionStates.set({})
 }
@@ -611,36 +550,12 @@ export function patchSessionTile(storedSessionId: string, patch: Partial<Session
 }
 
 /** Drop live runtime bindings so every tile re-resumes — used on gateway
- *  reconnect, where a respawned backend re-mints (recycles) runtime ids.
- *  Also invalidates the wiring cache's stored→runtime map: clearing only the
- *  tile atoms left `resumeTile`'s warm path free to re-bind the same dead
- *  runtime id from the cache, so post-wake tiles repainted empty and never
- *  actually re-resumed. */
+ *  reconnect, where a respawned backend re-mints (recycles) runtime ids. */
 export function resetTileRuntimeBindings() {
-  sessionTileDelegate()?.invalidateRuntimeBindings?.()
-
   const tiles = $sessionTiles.get()
 
   if (tiles.some(t => t.runtimeId)) {
     $sessionTiles.set(tiles.map(toStored))
-  }
-}
-
-/** Unbind ONE reclaimed runtime from whichever tile holds it — the targeted
- *  sibling of resetTileRuntimeBindings. The reconnect-time reset can't cover a
- *  backend reclaim: the WS re-dials immediately, but the orphan reaper fires a
- *  grace window LATER, so the reclaim lands after every reconnect-path unbind
- *  already ran. Without this, the tile keeps pointing at the dead runtime whose
- *  state `session.reclaimed` just dropped — an empty transcript under live
- *  chrome — and SessionTilePane's resume effect (gated on `!runtimeId`) never
- *  re-resumes. Clearing the binding re-arms that effect, which rebinds a fresh
- *  runtime from the stored row. The pane itself stays: the stored session is
- *  intact, only its live runtime was reclaimed. */
-export function unbindTileRuntime(runtimeId: string) {
-  const tiles = $sessionTiles.get()
-
-  if (tiles.some(t => t.runtimeId === runtimeId)) {
-    $sessionTiles.set(tiles.map(t => (t.runtimeId === runtimeId ? { ...t, runtimeId: undefined } : t)))
   }
 }
 
@@ -662,12 +577,6 @@ export interface SessionTileDelegate {
   executeSlash(rawCommand: string, sessionId: string): Promise<void>
   /** Interrupt a tile's running turn. */
   interruptSession(runtimeId: string): Promise<void>
-  /** Drop the wiring cache's stored→runtime bindings. Called on gateway
-   *  reconnect: a respawned backend re-mints runtime ids, so every binding
-   *  recorded before the reconnect is suspect — without this, `resumeTile`'s
-   *  warm path re-binds tiles to dead runtime ids (the sleep/wake "empty
-   *  right pane" bug). Bindings re-record from live post-reconnect events. */
-  invalidateRuntimeBindings?(): void
   /** Bind a live runtime id for a stored session (resume without touching
    *  the main view). Returns the runtime id, or throws. */
   resumeTile(storedSessionId: string): Promise<string>
@@ -756,14 +665,6 @@ export function openSessionTile(
 ) {
   const tiles = $sessionTiles.get()
 
-  // Opening a session in a tab/tile is "reading" it — clear its unread dot
-  // exactly like main-thread resume does. Previously only
-  // setSelectedStoredSessionId cleared unread, so tile-opened sessions kept
-  // their green dot even while the user was reading them. Acks the persisted
-  // watermark/marker too so a later list refresh doesn't repaint it.
-  markSessionRead(storedSessionId)
-  ackStoredSessionId(storedSessionId)
-
   if (storedSessionId === $selectedStoredSessionId.get()) {
     return
   }
@@ -815,17 +716,6 @@ export function nextSessionTileForWorkspace(): null | string {
       if (tiles.some(t => t.storedSessionId === storedSessionId)) {
         return storedSessionId
       }
-    }
-  }
-
-  // Nothing stacked WITH main — but a session tile in another zone can still
-  // shift in. Without this, closing main in a side-by-side layout skipped
-  // promotion entirely and dropped to a fresh "New session" draft, which read
-  // as "closing a pane gave me a new session" (#88924). Promoting the tile
-  // also collapses its zone, so Close is how a multi-pane layout shrinks.
-  for (const tile of tiles) {
-    if (tree && findGroupOfPane(tree, `${TILE_PANE_PREFIX}${tile.storedSessionId}`)) {
-      return tile.storedSessionId
     }
   }
 
@@ -1021,20 +911,6 @@ export const $focusedSessionState = computed([$focusedRuntimeId, $sessionStates]
  *  behind the workspace (A+B "disappear" when switching to C). */
 export const selectionHomesToWorkspace = (selected: null | string, tiles: readonly SessionTile[]): boolean =>
   !(selected && tiles.some(t => t.storedSessionId === selected))
-
-// Bringing a finished session to the front clears its green dot. Keyed on the
-// FOCUSED session, not the selected one: a tile is never $selectedStoredSessionId,
-// and a tile tab click goes through activateTreePane rather than focusOpenSession,
-// so this is the one hook that catches every way a tile reaches the front.
-// Clears the whole conversation family (markSessionRead) AND acks the
-// persisted watermark/marker (ackStoredSessionId) so the next list refresh
-// doesn't repaint the dot the user just cleared by looking at it.
-$focusedStoredSessionId.listen(focused => {
-  if (focused) {
-    markSessionRead(focused)
-    ackStoredSessionId(focused)
-  }
-})
 
 // Cold-start restore is the one selection change that is NOT a navigation: the
 // route already pointed at the primary session before the window loaded, and

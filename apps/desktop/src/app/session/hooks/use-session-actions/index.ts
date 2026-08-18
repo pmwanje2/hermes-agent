@@ -2,7 +2,6 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
-import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { deleteSession, getAllSessionMessages, getLatestSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -13,16 +12,9 @@ import { setSessionYolo } from '@/lib/yolo-session'
 import { normalizeChoices, setClarifyRequest } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
-import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
-import {
-  $activeGatewayProfile,
-  $gatewaySwapTarget,
-  $newChatProfile,
-  ensureGatewayProfile,
-  normalizeProfileKey
-} from '@/store/profile'
+import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   beginSessionMutation,
   endSessionMutation,
@@ -77,7 +69,6 @@ import {
   type TileDock
 } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
-import { forgetSessionUnread } from '@/store/session-unread'
 import { isWatchWindow } from '@/store/windows'
 import type { SessionCreateResponse, SessionMessage, SessionResumeResponse, UsageStats } from '@/types/hermes'
 
@@ -92,7 +83,6 @@ import {
   type BranchMessage,
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
-  goneSessionVerdict,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
@@ -713,10 +703,6 @@ export function useSessionActions({
       if (!takeWarmCache()) {
         setActiveSessionId(null)
         activeSessionIdRef.current = null
-        // History load is not turn-busy. Drop the previous session's leftover
-        // lock so focusing this session cannot inherit another chat's run.
-        busyRef.current = false
-        setBusy(false)
 
         if (!resumedSameSelectedSession) {
           setMessages([])
@@ -867,11 +853,6 @@ export function useSessionActions({
                 Boolean(sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.busy)
               )
 
-              const activatedTurnStartedAt =
-                typeof activated.turn_started_at === 'number' && activated.turn_started_at > 0
-                  ? activated.turn_started_at * 1000
-                  : null
-
               // The persisted REST transcript is the display authority: a live
               // runtime may carry only the agent's compressed context projection,
               // which is intentionally smaller than the user-visible conversation.
@@ -902,14 +883,7 @@ export function useSessionActions({
                   persistedMatchesActivatedSession &&
                   (persisted.messages.length || !activatedMessages.length)
                 ) {
-                  // The REST hydration is a newest-tail page; graft it onto any
-                  // older pages the previous view already backfilled so
-                  // re-activating a scrolled-back session keeps its history.
-                  const persistedMessages = graftRefreshedTailOntoBackfill(
-                    toChatMessages(persisted.messages),
-                    cachedViewState.messages
-                  )
-
+                  const persistedMessages = toChatMessages(persisted.messages)
                   const runtimeMessages = toChatMessages(activated.messages)
                   const previousMessages = removeRepresentedLocalLiveProjection(cachedViewState.messages, activated)
 
@@ -945,15 +919,11 @@ export function useSessionActions({
                   messages: activatedMessages,
                   busy: running,
                   awaitingResponse: running,
-                  // Resumed onto an already-running turn — that IS backend
-                  // proof the turn is live (no message.start will replay).
-                  turnLive: state.turnLive || running,
                   needsInput: pendingApproval || pendingClarify || state.needsInput,
                   // Adopting someone else's turn: we'll stream its reply
                   // without ever having received its prompt, so the settle
                   // path must not take the "I saw it all" shortcut.
-                  adoptedRunningTurn: state.adoptedRunningTurn || running,
-                  turnStartedAt: running ? (activatedTurnStartedAt ?? state.turnStartedAt ?? Date.now()) : null
+                  adoptedRunningTurn: state.adoptedRunningTurn || running
                 }),
                 storedSessionId
               )
@@ -1002,10 +972,9 @@ export function useSessionActions({
         setMessages([])
       }
 
-      // A history load is not a live turn. Do not mark the incoming session
-      // busy — running ≠ loading, and a leftover true locked the composer.
-      busyRef.current = false
-      setBusy(false)
+      // A history load is not a live turn. Toggling busy here and again in the
+      // finally block re-renders the thread viewport after it has loaded.
+      busyRef.current = true
       setAwaitingResponse(false)
       clearNotifications()
       setSelectedStoredSessionId(storedSessionId)
@@ -1051,7 +1020,6 @@ export function useSessionActions({
           session_id: storedSessionId,
           cols: 96,
           source: 'desktop',
-          defer_history: !watchWindow,
           // REST is the transcript authority for Desktop. Avoid duplicating a
           // potentially huge compression lineage in the WebSocket response.
           // Watch windows attach lazily (live mirror). Every other cold resume
@@ -1096,14 +1064,8 @@ export function useSessionActions({
             ? preserveLocalPendingTurnMessages($messages.get(), resumeStartMessages)
             : $messages.get()
 
-          // Tail page + previously backfilled prefix (same-session re-resume).
-          const graftedPrefetch = graftRefreshedTailOntoBackfill(
-            toChatMessages(prefetchedResult.messages),
-            previousMessages
-          )
-
-          prefetchedTranscriptMessages = graftedPrefetch
-          localSnapshot = reconcileAuthoritativeChatMessages(graftedPrefetch, previousMessages)
+          prefetchedTranscriptMessages = toChatMessages(prefetchedResult.messages)
+          localSnapshot = reconcileAuthoritativeChatMessages(prefetchedTranscriptMessages, previousMessages)
           prefetchApplied = true
           prefetchedStoredSessionId = prefetchedResult.session_id || storedSessionId
         }
@@ -1229,14 +1191,6 @@ export function useSessionActions({
 
         patchSessionWorkspace(storedSessionId, runtimeInfo?.cwd)
 
-        // Preserve the turn-elapsed timer across cold resume: the gateway
-        // reports when the in-flight turn started so the desktop can restore
-        // the clock instead of resetting it to 0:00.
-        const resumedTurnStartedAt =
-          typeof resumed.turn_started_at === 'number' && resumed.turn_started_at > 0
-            ? resumed.turn_started_at * 1000
-            : null
-
         updateSessionState(
           resumed.session_id,
           state => ({
@@ -1245,8 +1199,6 @@ export function useSessionActions({
             messages: messagesForView,
             busy: resumedRunning,
             awaitingResponse: resumedRunning && !recoveredInFlightTail,
-            // Backend reported this turn running at resume time — live proof.
-            turnLive: state.turnLive || resumedRunning,
             needsInput: pendingApproval || pendingClarify || state.needsInput,
             adoptedRunningTurn: state.adoptedRunningTurn || resumedRunning,
             ...(inFlightRecovery.applied
@@ -1255,11 +1207,11 @@ export function useSessionActions({
                   // Point live deltas at the recovered row when the backend is
                   // still mid-turn; a settled recovery keeps the stream idle.
                   streamId: resumedRunning ? inFlightRecovery.streamId : null,
-                  turnStartedAt: resumedRunning ? (inFlightRecovery.turnStartedAt ?? resumedTurnStartedAt) : null
+                  turnStartedAt: resumedRunning
+                    ? (inFlightRecovery.turnStartedAt ?? state.turnStartedAt ?? Date.now())
+                    : state.turnStartedAt
                 }
-              : {
-                  turnStartedAt: resumedRunning && resumedTurnStartedAt !== null ? resumedTurnStartedAt : null
-                })
+              : {})
           }),
           storedSessionId
         )
@@ -1324,39 +1276,11 @@ export function useSessionActions({
         // permanently-dead id. (Booting straight into a no-longer-existent
         // last-session id is the common trigger.)
         if ($messages.get().length === 0 && isSessionGoneError(fallbackError)) {
-          // A 404 is only trustworthy from the backend that OWNS the session.
-          // A cross-profile open (Bots pane) races the gateway swap, so both
-          // lookups can land on a backend that never heard of the id (#88540).
-          // Re-resolve before discarding: a row still listed on any profile —
-          // or a swap in flight — means "retry once things settle", not gone.
-          let stillListed = false
-
-          try {
-            stillListed = Boolean(await resolveStoredSession(storedSessionId))
-          } catch {
-            // Resolution itself failed — inconclusive, treat as not listed.
-          }
-
-          if (!isCurrentResume()) {
-            return
-          }
-
-          const verdict = goneSessionVerdict({
-            createdThisRun: createdThisRun.has(storedSessionId),
-            stillListed,
-            switchInFlight:
-              $gatewaySwitching.get() ||
-              Boolean($gatewaySwapTarget.get()) ||
-              // Known owner ≠ active gateway: the 404 came from the wrong
-              // backend. An UNKNOWN owner must not count — it would block the
-              // draft fallback for genuinely dead ids on secondary profiles.
-              Boolean(
-                sessionProfile?.trim() &&
-                normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get())
-              )
-          })
-
-          if (verdict === 'retry') {
+          // A session created THIS run isn't gone — its backend just flapped
+          // before the turn-less session persisted. Keep the empty view and arm
+          // the bounded retry to rebind, rather than yanking to a fresh draft.
+          // Only a stale id from a PRIOR run drops to a draft.
+          if (createdThisRun.has(storedSessionId)) {
             setResumeFailedSessionId(storedSessionId)
 
             return
@@ -1668,9 +1592,6 @@ export function useSessionActions({
         }
 
         await deleteSession(storedSessionId, removed?.profile)
-        // Only after the RPC lands — the optimistic eviction above can roll
-        // back, and a rolled-back row must keep its watermark/marker.
-        forgetSessionUnread(removedIds, removed?.profile)
         clearQueuedPrompts(storedSessionId)
 
         if (closingRuntimeId) {
@@ -1761,9 +1682,6 @@ export function useSessionActions({
 
       try {
         await setSessionArchived(storedSessionId, true, archived?.profile)
-        // Archived rows never reach the sidebar, so their persisted unread can
-        // only rot. Dropped after the RPC so a failed archive keeps it.
-        forgetSessionUnread(archivedIds, archived?.profile)
         // An archived session is hidden from the sidebar; its tile must go too.
         const tiledRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
         closeSessionTile(storedSessionId)

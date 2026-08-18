@@ -47,16 +47,13 @@ logger = logging.getLogger("hermes.mcp_serve")
 # Lazy MCP SDK import
 # ---------------------------------------------------------------------------
 
-# mcp 2.0 removed `mcp.server.fastmcp`; its decorator-driven server is now
-# `mcp.server.MCPServer` with the same `@server.tool()` / `run_stdio_async()`
-# surface (docstring -> tool description, signature -> input schema).
 _MCP_SERVER_AVAILABLE = False
 try:
-    from mcp.server import MCPServer
+    from mcp.server.fastmcp import FastMCP
 
     _MCP_SERVER_AVAILABLE = True
 except ImportError:
-    MCPServer = None  # type: ignore[assignment,misc]
+    FastMCP = None  # type: ignore[assignment,misc]
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +617,7 @@ class EventBridge:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "MCPServer":
+def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     """Create and return the Hermes MCP server with all tools registered."""
     if not _MCP_SERVER_AVAILABLE:
         raise ImportError(
@@ -628,7 +625,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "MCPServer"
             f"Install with: {sys.executable} -m pip install 'mcp'"
         )
 
-    mcp = MCPServer(
+    mcp = FastMCP(
         "hermes",
         instructions=(
             "Hermes Agent messaging bridge. Use these tools to interact with "

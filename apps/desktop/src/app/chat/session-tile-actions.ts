@@ -13,6 +13,7 @@ import { useCallback, useMemo, useRef } from 'react'
 
 import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
 import type { ClientSessionState } from '@/app/types'
+import { PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
@@ -43,14 +44,15 @@ import {
   planRestore,
   rebindSurvivorRowIds,
   runRewindSubmit,
-  type SurvivorUserRowIds
+  survivorRowIdsFrom,
+  type SurvivorUserRowIds,
+  truncateSubmitParams
 } from '../session/hooks/use-prompt-actions/rewind'
 import { useSubmitPrompt } from '../session/hooks/use-prompt-actions/submit'
 import {
   markSessionRecentlyInterrupted,
   shouldInterruptBeforeRewind,
-  type SubmitTextOptions,
-  withSessionNotFoundResume
+  type SubmitTextOptions
 } from '../session/hooks/use-prompt-actions/utils'
 import { upsertOptimisticSession } from '../session/hooks/use-session-actions/utils'
 
@@ -198,20 +200,7 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
           })
 
           if (options.updateComposerAttachments ?? true) {
-            if (attachment.occurrenceId) {
-              // Merge staging into the latest state for this exact tile-chip
-              // occurrence. A preview may complete while upload is pending,
-              // and remove + same-path reattach must not receive stale staging.
-              scope.attachments.updateIfCurrent(attachment, {
-                attachedSessionId: next.attachedSessionId,
-                label: next.label,
-                path: next.path,
-                refText: next.refText,
-                uploadState: next.uploadState
-              })
-            } else {
-              scope.attachments.update(next)
-            }
+            scope.attachments.update(next)
           }
 
           synced.push(next)
@@ -248,7 +237,7 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
     syncAttachmentsForSubmit,
     updateSessionState: (sessionId, updater) => sessionTileDelegate()!.updateSession(sessionId, updater),
     scope: {
-      removeAttachments: attachments => scope.attachments.removeOccurrences(attachments),
+      clearAttachments: scope.attachments.clear,
       readAttachments: () => scope.attachments.$attachments.get(),
       // Busy/messages flow through updateSession -> the tile's state slice;
       // the primary view atoms must never see a tile turn.
@@ -302,17 +291,7 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
     clearClarifyRequest(undefined, sessionId)
 
     try {
-      await withSessionNotFoundResume(
-        sessionId,
-        storedIdRef.current,
-        liveId => requestGateway('session.interrupt', { session_id: liveId }),
-        {
-          requestGateway,
-          onRecovered: recoveredId => {
-            runtimeIdRef.current = recoveredId
-          }
-        }
-      )
+      await requestGateway('session.interrupt', { session_id: sessionId })
     } catch (err) {
       notifyError(err, copy.stopFailed)
     }
@@ -363,17 +342,10 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
         })
 
       try {
-        const { result } = await withSessionNotFoundResume(
-          sessionId,
-          storedIdRef.current,
-          liveId => requestGateway<{ status?: string }>('session.redirect', { session_id: liveId, text }),
-          {
-            requestGateway,
-            onRecovered: recoveredId => {
-              runtimeIdRef.current = recoveredId
-            }
-          }
-        )
+        const result = await requestGateway<{ status?: string }>('session.redirect', {
+          session_id: sessionId,
+          text
+        })
 
         if (result?.status === 'redirected') {
           triggerHaptic('submit')
@@ -409,8 +381,7 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
       truncateOrdinal: number | undefined,
       interruptFirst: boolean,
       truncateMessageId?: string,
-      truncateRowId?: number,
-      sourceText?: string
+      truncateRowId?: number
     ) =>
       runRewindSubmit(
         requestGateway,
@@ -425,8 +396,7 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
             runtimeIdRef.current = recoveredId
           }
         },
-        truncateRowId,
-        sourceText
+        truncateRowId
       ),
     [requestGateway]
   )
@@ -464,25 +434,23 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
       update(current => applyReloadOptimistic(current, plan))
 
       try {
-        // Recovery for a dead runtime id rides inside submitRewind →
-        // runRewindSubmit (withSessionNotFoundResume + runtime rebind), so the
-        // PR-era inline prompt.submit wrapper is superseded on current main.
-        applySurvivorRowIds(
-          await submitRewind(
-            plan.text,
-            plan.truncateOrdinal,
-            false,
-            plan.truncateMessageId,
-            plan.truncateRowId,
-            plan.sourceText
-          )
+        const result = await requestGateway<{ survivor_user_row_ids?: unknown }>(
+          'prompt.submit',
+          {
+            session_id: runtimeIdRef.current,
+            text: plan.text,
+            ...truncateSubmitParams(plan.truncateOrdinal, plan.truncateMessageId, plan.truncateRowId)
+          },
+          PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
         )
+
+        applySurvivorRowIds(survivorRowIdsFrom(result))
       } catch (err) {
-        update(current => ({ ...current, busy: false, awaitingResponse: false, turnLive: false, turnStartedAt: null }))
+        update(current => ({ ...current, busy: false, awaitingResponse: false }))
         notifyError(err, copy.regenerateFailed)
       }
     },
-    [applySurvivorRowIds, copy.regenerateFailed, readState, submitRewind, update]
+    [applySurvivorRowIds, copy.regenerateFailed, readState, requestGateway, update]
   )
 
   const restoreToMessage = useCallback(
@@ -509,19 +477,11 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
             plan.truncateOrdinal,
             interruptFirst,
             plan.truncateMessageId,
-            plan.truncateRowId,
-            plan.sourceText
+            plan.truncateRowId
           )
         )
       } catch (err) {
-        update(state => ({
-          ...state,
-          busy: false,
-          awaitingResponse: false,
-          turnLive: false,
-          turnStartedAt: null,
-          messages
-        }))
+        update(state => ({ ...state, busy: false, awaitingResponse: false, messages }))
         throw err
       }
     },
@@ -557,19 +517,11 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
             plan.truncateOrdinal,
             interruptFirst,
             plan.truncateMessageId,
-            plan.truncateRowId,
-            plan.sourceText
+            plan.truncateRowId
           )
         )
       } catch (err) {
-        update(state => ({
-          ...state,
-          busy: false,
-          awaitingResponse: false,
-          turnLive: false,
-          turnStartedAt: null,
-          messages
-        }))
+        update(state => ({ ...state, busy: false, awaitingResponse: false, messages }))
         notifyError(err, copy.editFailed)
       }
     },

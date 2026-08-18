@@ -13,30 +13,13 @@ import { selectableCardClass } from '@/lib/selectable-card'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { $backdrop, setBackdrop } from '@/store/backdrop'
-import { $composerPopoutGesturesEnabled, setComposerPopoutGesturesEnabled } from '@/store/composer-popout'
 import { $embedAllowed, $embedMode, clearEmbedAllowed, type EmbedMode, setEmbedMode } from '@/store/embed-consent'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enabled'
 import { $reasoningCollapsedByDefault, setReasoningCollapsedByDefault } from '@/store/reasoning-disclosure'
 import { $sessionListDensity, type SessionListDensity, setSessionListDensity } from '@/store/session-list-density'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
-import {
-  $translucency,
-  beginTranslucencyPeek,
-  endTranslucencyPeek,
-  GLASS_MATERIALS,
-  GLASS_SCOPES,
-  GLASS_SUPPORTED,
-  pulseTranslucencyPeek,
-  resetTranslucencyPeek,
-  setTranslucency,
-  setTranslucencyMaterial,
-  setTranslucencyMode,
-  setTranslucencyScope,
-  TRANSLUCENCY_MAX,
-  TRANSLUCENCY_MIN,
-  TRANSLUCENCY_STEP
-} from '@/store/translucency'
+import { $translucency, setTranslucency } from '@/store/translucency'
 import { $zoomPercent, setZoomPercent } from '@/store/zoom'
 import { getBaseColors, useTheme } from '@/themes/context'
 import { installVscodeThemeFromMarketplace } from '@/themes/install'
@@ -45,7 +28,7 @@ import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/use
 
 import { MODE_OPTIONS } from './constants'
 import { PetSettings } from './pet-settings'
-import { ListRow, SectionHeading, SettingsContent, ToggleRow } from './primitives'
+import { ListRow, SectionHeading, SettingsContent } from './primitives'
 import { TerminalFontSetting } from './terminal-font-setting'
 
 function ThemePreview({ name, mode }: { name: string; mode: 'light' | 'dark' }) {
@@ -263,19 +246,6 @@ function MarketplaceThemeResults({
   )
 }
 
-// Keys a range input treats as a step, so the peek can flash the live window
-// for keyboard adjustment the way a pointer drag holds it open.
-const SLIDER_STEP_KEYS = new Set([
-  'ArrowDown',
-  'ArrowLeft',
-  'ArrowRight',
-  'ArrowUp',
-  'End',
-  'Home',
-  'PageDown',
-  'PageUp'
-])
-
 export function AppearanceSettings() {
   const { t, isSavingLocale } = useI18n()
   const { themeName, mode, resolvedMode, availableThemes, setTheme, setMode } = useTheme()
@@ -285,7 +255,6 @@ export function AppearanceSettings() {
   const zoomPercent = useStore($zoomPercent)
   const embedMode = useStore($embedMode)
   const embedAllowed = useStore($embedAllowed)
-  const composerPopoutGesturesEnabled = useStore($composerPopoutGesturesEnabled)
   const translucency = useStore($translucency)
   const reactionsEnabled = useStore($reactionsEnabled)
   const backdrop = useStore($backdrop)
@@ -293,26 +262,6 @@ export function AppearanceSettings() {
   const profiles = useStore($profiles)
   const activeProfileKey = normalizeProfileKey(useStore($activeGatewayProfile))
   const a = t.settings.appearance
-
-  // A pointer held on the intensity slider when this overlay closes (Escape
-  // mid-drag) never delivers its pointerup here, which would strand the peek
-  // counter above zero and ghost the NEXT settings overlay. Unmount drops
-  // every outstanding hold.
-  useEffect(() => resetTranslucencyPeek, [])
-
-  // Shared by the mode/frost/area pickers: apply the choice, then show it
-  // through the overlay it just altered (a pulse, not a hold — see the peek
-  // notes on the slider itself).
-  const pickTranslucency =
-    <T,>(set: (value: T) => void) =>
-    (value: T) => {
-      triggerHaptic('selection')
-      set(value)
-
-      if (translucency.intensity > 0) {
-        pulseTranslucencyPeek()
-      }
-    }
 
   const [query, setQuery] = useState('')
 
@@ -511,89 +460,27 @@ export function AppearanceSettings() {
 
           <ListRow
             action={
-              <div
-                className="flex items-center gap-3"
-                // Arms the peek for the overlay this row lives in — the
-                // ghosting rules in styles.css scope to it, so no other
-                // overlay pays for an opacity transition it never uses.
-                data-translucency-peek-scope=""
-              >
-                {GLASS_SUPPORTED && (
-                  <SegmentedControl
-                    onChange={pickTranslucency(setTranslucencyMode)}
-                    options={[
-                      { id: 'clear' as const, label: a.translucencyModeClear },
-                      { id: 'glass' as const, label: a.translucencyModeGlass }
-                    ]}
-                    value={translucency.mode}
-                  />
-                )}
+              <div className="flex items-center gap-3">
                 <input
                   aria-label={a.translucencyTitle}
                   className="h-1 w-40 cursor-pointer appearance-none rounded-full bg-(--ui-stroke-tertiary)"
-                  max={TRANSLUCENCY_MAX}
-                  min={TRANSLUCENCY_MIN}
-                  // Peek while the hand is on the slider: the overlay (scrim +
-                  // near-opaque card) ghosts so the window behind IS the live
-                  // preview. Pointer pair covers mouse/touch drags; the
-                  // keyboard path pulses per step instead (blur ends any
-                  // residual hold).
-                  onBlur={endTranslucencyPeek}
+                  max={100}
+                  min={0}
                   onChange={event => {
                     triggerHaptic('selection')
                     setTranslucency(Number(event.target.value))
                   }}
-                  onKeyDown={event => {
-                    if (SLIDER_STEP_KEYS.has(event.key)) {
-                      pulseTranslucencyPeek()
-                    }
-                  }}
-                  onLostPointerCapture={endTranslucencyPeek}
-                  onPointerDown={beginTranslucencyPeek}
-                  onPointerUp={endTranslucencyPeek}
-                  step={TRANSLUCENCY_STEP}
+                  step={5}
                   style={{ accentColor: 'var(--dt-primary)' }}
                   type="range"
-                  value={translucency.intensity}
+                  value={translucency}
                 />
                 <span className="w-9 text-right text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)">
-                  {translucency.intensity}%
+                  {translucency}%
                 </span>
               </div>
             }
-            below={
-              translucency.mode === 'glass' && GLASS_SUPPORTED ? (
-                <div className="mt-3 flex flex-col gap-2.5">
-                  <div className="flex items-center gap-3">
-                    <span className="w-12 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-                      {a.translucencyFrostTitle}
-                    </span>
-                    <SegmentedControl
-                      onChange={pickTranslucency(setTranslucencyMaterial)}
-                      options={GLASS_MATERIALS.map(material => ({
-                        id: material,
-                        label: a.translucencyFrost[material]
-                      }))}
-                      value={translucency.material}
-                    />
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="w-12 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-                      {a.translucencyScopeTitle}
-                    </span>
-                    <SegmentedControl
-                      onChange={pickTranslucency(setTranslucencyScope)}
-                      options={GLASS_SCOPES.map(scope => ({
-                        id: scope,
-                        label: a.translucencyScope[scope]
-                      }))}
-                      value={translucency.scope}
-                    />
-                  </div>
-                </div>
-              ) : undefined
-            }
-            description={translucency.mode === 'glass' ? a.translucencyGlassDesc : a.translucencyDesc}
+            description={a.translucencyDesc}
             title={a.translucencyTitle}
           />
 
@@ -613,13 +500,6 @@ export function AppearanceSettings() {
             }
             description={a.backdropDesc}
             title={a.backdropTitle}
-          />
-
-          <ToggleRow
-            checked={composerPopoutGesturesEnabled}
-            description={a.composerPopoutDesc}
-            label={a.composerPopoutTitle}
-            onChange={setComposerPopoutGesturesEnabled}
           />
 
           <ListRow

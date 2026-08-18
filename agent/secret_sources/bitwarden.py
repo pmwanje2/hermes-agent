@@ -47,6 +47,10 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 from agent.secret_sources._cache import (
     CachedFetch as _CachedFetch,
     DiskCache,
@@ -371,13 +375,6 @@ def _b64d(text: str) -> bytes:
 
 def _derive_encrypted_cache_key(access_token: str, salt: bytes) -> bytes:
     """Derive the local cache encryption key from the bootstrap BWS token."""
-    # Keep the native cryptography extension lazy.  Most CLI commands import
-    # this module while building argparse, even though only encrypted-cache
-    # reads/writes need it.  Eagerly importing it maps ``_rust.pyd`` into a
-    # Windows updater and prevents uv from replacing that file (#73381).
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -400,8 +397,6 @@ def _write_encrypted_disk_cache(
     """
     path = _encrypted_disk_cache_path(home_path)
     try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
         cache_dir = path.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -464,8 +459,6 @@ def _read_encrypted_disk_cache(
         return None
     path = _encrypted_disk_cache_path(home_path)
     try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return None

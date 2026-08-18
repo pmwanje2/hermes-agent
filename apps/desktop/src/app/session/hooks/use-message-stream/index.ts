@@ -9,7 +9,6 @@ import {
   type ChatMessage,
   type ChatMessagePart,
   chatMessageText,
-  completeOpenTimelineParts,
   type GatewayEventPayload,
   mergeFinalAssistantText,
   reasoningPart,
@@ -53,10 +52,9 @@ interface MessageStreamOptions {
   ) => ClientSessionState
 }
 
-interface QueuedStreamDelta {
-  occurredAt: number
-  text: string
-  type: 'assistant' | 'reasoning'
+interface QueuedStreamDeltas {
+  assistant: string
+  reasoning: string
 }
 
 // Date.now() alone can collide when an interim seal and the next segment's
@@ -90,8 +88,7 @@ export function useMessageStream({
       seed: () => ChatMessagePart[],
       opts: {
         pending?: (message: ChatMessage) => boolean
-      } = {},
-      occurredAt = Date.now() / 1000
+      } = {}
     ) => {
       const apply = () => {
         updateSessionState(sessionId, state => {
@@ -115,7 +112,6 @@ export function useMessageStream({
                 id: streamId,
                 role: 'assistant',
                 parts: seed(),
-                timestamp: occurredAt,
                 pending: true,
                 branchGroupId: groupId
               }
@@ -187,7 +183,7 @@ export function useMessageStream({
     []
   )
 
-  const queuedDeltasRef = useRef<Map<string, QueuedStreamDelta[]>>(new Map())
+  const queuedDeltasRef = useRef<Map<string, QueuedStreamDeltas>>(new Map())
   const flushHandleRef = useRef<number | null>(null)
   const lastFlushAtRef = useRef<number>(0)
   // What the previous flush cost on the main thread — drives the adaptive
@@ -217,16 +213,21 @@ export function useMessageStream({
 
         queue.delete(id)
 
-        const applyQueued = (parts: ChatMessagePart[]) =>
-          queued.reduce(
-            (next, delta) =>
-              delta.type === 'assistant'
-                ? dedupeGeneratedImageEchoesInParts(appendAssistantTextPart(next, delta.text, delta.occurredAt))
-                : appendReasoningPart(next, delta.text, delta.occurredAt),
-            parts
+        if (queued.assistant) {
+          mutateStream(
+            id,
+            parts => dedupeGeneratedImageEchoesInParts(appendAssistantTextPart(parts, queued.assistant)),
+            () => [assistantTextPart(queued.assistant)]
           )
+        }
 
-        mutateStream(id, applyQueued, () => applyQueued([]), {}, queued[0]?.occurredAt)
+        if (queued.reasoning) {
+          mutateStream(
+            id,
+            parts => appendReasoningPart(parts, queued.reasoning),
+            () => [reasoningPart(queued.reasoning)]
+          )
+        }
       }
     },
     [mutateStream]
@@ -329,20 +330,13 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const queueDelta = useCallback(
-    (sessionId: string, key: 'assistant' | 'reasoning', delta: string, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, key: keyof QueuedStreamDeltas, delta: string) => {
       if (!delta) {
         return
       }
 
-      const queued = queuedDeltasRef.current.get(sessionId) ?? []
-      const tail = queued.at(-1)
-
-      if (tail?.type === key) {
-        tail.text += delta
-      } else {
-        queued.push({ occurredAt, text: delta, type: key })
-      }
-
+      const queued = queuedDeltasRef.current.get(sessionId) ?? { assistant: '', reasoning: '' }
+      queued[key] += delta
       queuedDeltasRef.current.set(sessionId, queued)
       scheduleDeltaFlush()
     },
@@ -397,24 +391,24 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const appendAssistantDelta = useCallback(
-    (sessionId: string, delta: string, occurredAt?: number) => {
+    (sessionId: string, delta: string) => {
       if (!delta) {
         return
       }
 
-      queueDelta(sessionId, 'assistant', delta, occurredAt)
+      queueDelta(sessionId, 'assistant', delta)
     },
     [queueDelta]
   )
 
   const appendReasoningDelta = useCallback(
-    (sessionId: string, delta: string, replace = false, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, delta: string, replace = false) => {
       if (!delta) {
         return
       }
 
       if (!replace) {
-        queueDelta(sessionId, 'reasoning', delta, occurredAt)
+        queueDelta(sessionId, 'reasoning', delta)
 
         return
       }
@@ -429,14 +423,12 @@ export function useMessageStream({
           }
 
           if (replace) {
-            return [...parts.filter(part => part.type !== 'reasoning'), reasoningPart(delta, occurredAt)]
+            return [...parts.filter(part => part.type !== 'reasoning'), reasoningPart(delta)]
           }
 
-          return appendReasoningPart(parts, delta, occurredAt)
+          return appendReasoningPart(parts, delta)
         },
-        () => [reasoningPart(delta, occurredAt)],
-        {},
-        occurredAt
+        () => [reasoningPart(delta)]
       )
     },
     [flushQueuedDeltas, mutateStream, queueDelta]
@@ -447,8 +439,7 @@ export function useMessageStream({
       sessionId: string,
       payload: GatewayEventPayload | undefined,
       phase: 'running' | 'complete',
-      sourceEventType?: string,
-      occurredAt = Date.now() / 1000
+      sourceEventType?: string
     ) => {
       // Text deltas flush on a timer but tool events apply now; flush first so
       // a tool part can't jump ahead of the text that preceded it.
@@ -481,17 +472,16 @@ export function useMessageStream({
 
       mutateStream(
         sessionId,
-        parts => dedupeGeneratedImageEchoesInParts(upsertToolPart(parts, payload, phase, occurredAt)),
-        () => upsertToolPart([], payload, phase, occurredAt),
-        { pending: m => phase !== 'complete' || (m.pending ?? false) },
-        occurredAt
+        parts => dedupeGeneratedImageEchoesInParts(upsertToolPart(parts, payload, phase)),
+        () => upsertToolPart([], payload, phase),
+        { pending: m => phase !== 'complete' || (m.pending ?? false) }
       )
     },
     [flushQueuedDeltas, mutateStream, sessionInterrupted]
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, text: string) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
@@ -508,7 +498,7 @@ export function useMessageStream({
         const replaceTextPart = (parts: ChatMessagePart[]) => {
           const visibleText = stripGeneratedImageEchoes(authoritativeText, generatedImageEchoSources(parts)).trim()
 
-          return mergeFinalAssistantText(parts, visibleText, occurredAt)
+          return mergeFinalAssistantText(parts, visibleText)
         }
 
         let nextMessages = state.messages
@@ -517,15 +507,7 @@ export function useMessageStream({
           // Seal the streaming bubble in place, marked interim so it renders
           // without an action footer (see ChatMessage.interim).
           nextMessages = nextMessages.map(m =>
-            m.id === streamId
-              ? {
-                  ...m,
-                  parts: completeOpenTimelineParts(replaceTextPart(m.parts), occurredAt),
-                  completedAt: occurredAt,
-                  pending: false,
-                  interim: true
-                }
-              : m
+            m.id === streamId ? { ...m, parts: replaceTextPart(m.parts), pending: false, interim: true } : m
           )
         } else {
           // No streaming bubble — create a standalone interim message
@@ -534,9 +516,7 @@ export function useMessageStream({
             {
               id: nextStreamMessageId('assistant-interim'),
               role: 'assistant' as const,
-              parts: [{ ...assistantTextPart(authoritativeText, occurredAt), completedAt: occurredAt }],
-              timestamp: occurredAt,
-              completedAt: occurredAt,
+              parts: [assistantTextPart(authoritativeText)],
               pending: false,
               interim: true,
               branchGroupId: state.pendingBranchGroup ?? undefined
@@ -557,13 +537,7 @@ export function useMessageStream({
   )
 
   const completeAssistantMessage = useCallback(
-    (
-      sessionId: string,
-      text: string,
-      responsePreviewed?: boolean,
-      failure?: { error: string; partial: boolean },
-      occurredAt = Date.now() / 1000
-    ) => {
+    (sessionId: string, text: string, responsePreviewed?: boolean, failure?: { error: string; partial: boolean }) => {
       let shouldHydrate = false
 
       const completedState = updateSessionState(sessionId, state => {
@@ -579,8 +553,7 @@ export function useMessageStream({
             needsInput: false,
             pendingBranchGroup: null,
             streamId: null,
-            turnStartedAt: null,
-            turnLive: false
+            turnStartedAt: null
           }
         }
 
@@ -595,37 +568,24 @@ export function useMessageStream({
         const keepFailedPartialText = Boolean(failure?.partial && finalText)
         const interimBoundaryPending = state.interimBoundaryPending
 
-        // Wall-clock seconds this turn actually ran (message.start stamped
-        // turnStartedAt). Read BEFORE the state return below nulls it.
-        const durationS = state.turnStartedAt
-          ? Math.max(1, Math.round((Date.now() - state.turnStartedAt) / 1000))
-          : undefined
-
         const replaceTextPart = (parts: ChatMessagePart[]) => {
           const visibleFinalText = stripGeneratedImageEchoes(finalText, generatedImageEchoSources(parts)).trim()
 
-          return mergeFinalAssistantText(parts, visibleFinalText, occurredAt)
+          return mergeFinalAssistantText(parts, visibleFinalText)
         }
 
         // Settling the final response onto a bubble makes it the turn's real
         // reply — clear `interim` so it regains the action footer.
         const completeMessage = (message: ChatMessage): ChatMessage => {
-          const settled = {
-            ...message,
-            completedAt: occurredAt,
-            parts: completeOpenTimelineParts(message.parts, occurredAt),
-            pending: false,
-            interim: false,
-            ...(durationS !== undefined ? { durationS } : {})
-          }
+          const settled = { ...message, pending: false, interim: false }
 
           if (completionError && !keepFailedPartialText) {
-            return { ...settled, error: completionError, parts: settled.parts.filter(part => part.type !== 'text') }
+            return { ...settled, error: completionError, parts: message.parts.filter(part => part.type !== 'text') }
           }
 
           return {
             ...settled,
-            parts: completeOpenTimelineParts(replaceTextPart(settled.parts), occurredAt),
+            parts: replaceTextPart(message.parts),
             ...(completionError ? { error: completionError } : {})
           }
         }
@@ -633,14 +593,8 @@ export function useMessageStream({
         const newAssistantFromCompletion = (): ChatMessage => ({
           id: `assistant-${Date.now()}`,
           role: 'assistant',
-          parts:
-            completionError && !keepFailedPartialText
-              ? []
-              : [{ ...assistantTextPart(finalText, occurredAt), completedAt: occurredAt }],
-          timestamp: occurredAt,
-          completedAt: occurredAt,
+          parts: completionError && !keepFailedPartialText ? [] : [assistantTextPart(finalText)],
           branchGroupId: state.pendingBranchGroup ?? undefined,
-          ...(durationS !== undefined ? { durationS } : {}),
           ...(completionError && { error: completionError })
         })
 
@@ -743,8 +697,7 @@ export function useMessageStream({
           busy: false,
           needsInput: false,
           interimBoundaryPending: false,
-          turnStartedAt: null,
-          turnLive: false
+          turnStartedAt: null
         }
       })
 
@@ -780,27 +733,20 @@ export function useMessageStream({
   )
 
   const failAssistantMessage = useCallback(
-    (sessionId: string, errorMessage: string, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, errorMessage: string) => {
       updateSessionState(sessionId, state => {
         const streamId = state.streamId ?? `assistant-error-${Date.now()}`
         const groupId = state.pendingBranchGroup ?? undefined
         const prev = state.messages
         const error = errorMessage.trim() || 'Hermes reported an error'
 
-        const durationS = state.turnStartedAt
-          ? Math.max(1, Math.round((Date.now() - state.turnStartedAt) / 1000))
-          : undefined
-
         const nextMessages = prev.some(m => m.id === streamId)
           ? prev.map(message =>
               message.id === streamId
                 ? {
                     ...message,
-                    completedAt: occurredAt,
                     error,
-                    parts: completeOpenTimelineParts(message.parts, occurredAt),
-                    pending: false,
-                    ...(durationS !== undefined ? { durationS } : {})
+                    pending: false
                   }
                 : message
             )
@@ -810,12 +756,9 @@ export function useMessageStream({
                 id: streamId,
                 role: 'assistant' as const,
                 parts: [],
-                timestamp: occurredAt,
-                completedAt: occurredAt,
                 error,
                 pending: false,
-                branchGroupId: groupId,
-                ...(durationS !== undefined ? { durationS } : {})
+                branchGroupId: groupId
               }
             ]
 
@@ -829,8 +772,7 @@ export function useMessageStream({
           busy: false,
           needsInput: false,
           interimBoundaryPending: false,
-          turnStartedAt: null,
-          turnLive: false
+          turnStartedAt: null
         }
       })
     },
@@ -849,10 +791,8 @@ export function useMessageStream({
     failAssistantMessage,
     flushQueuedDeltas,
     finalizeInterimAssistantMessage,
-    hydrateFromStoredSession,
     queryClient,
     refreshHermesConfig,
-    scheduleSessionsRefresh,
     sessionInterrupted,
     sessionStateByRuntimeIdRef,
     updateSessionState,

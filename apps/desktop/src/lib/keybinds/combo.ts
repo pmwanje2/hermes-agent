@@ -33,8 +33,6 @@ const CODE_TO_KEY: Record<string, string> = {
   Escape: 'escape',
   Backspace: 'backspace',
   Tab: 'tab',
-  PageUp: 'pageup',
-  PageDown: 'pagedown',
   ArrowUp: 'up',
   ArrowDown: 'down',
   ArrowLeft: 'left',
@@ -171,8 +169,6 @@ const TOKEN_LABELS: Record<string, string> = {
   escape: 'Esc',
   backspace: '⌫',
   tab: '⇥',
-  pageup: 'PgUp',
-  pagedown: 'PgDn',
   space: 'Space',
   up: '↑',
   down: '↓',
@@ -192,7 +188,7 @@ function labelForBase(base: string): string {
   return base.length === 1 ? base.toUpperCase() : base
 }
 
-export function formatModifierToken(mod: string): string {
+function labelForMod(mod: string): string {
   if (mod === 'mod') {
     return IS_MAC ? '⌘' : 'Ctrl'
   }
@@ -218,7 +214,7 @@ export function comboTokens(combo: string): string[] {
   const parts = combo.split('+')
   const base = parts.pop() ?? ''
 
-  return [...parts.map(formatModifierToken), labelForBase(base)]
+  return [...parts.map(labelForMod), labelForBase(base)]
 }
 
 // Human-readable label, e.g. "⌘⇧K" on macOS, "Ctrl+Shift+K" elsewhere.
@@ -260,25 +256,14 @@ const INPUT_SAFE_ACTIONS = new Set([
 
 const TEXT_NAVIGATION_KEYS = new Set(['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown'])
 
-// Only explicit text-entry-safe actions fire while typing. A primary-modifier
-// chord (Cmd/Ctrl) is a deliberate two-key gesture that every browser and chat
-// app fires even with focus in a text field (⌘N, ⌘T, ⌘K, ⌃Tab…), so those stay
-// global — restoring the pre-#86586 behavior. Editing/navigation chords such
-// as Ctrl+Arrow/PageUp must stay with the input even if a user rebinds them to
-// a global navigation action, and bare/Shift-only combos (typed letters) are
-// gated by the allowlist so they never hijack normal typing.
+// Only explicit text-entry-safe actions fire while typing. Editing/navigation
+// chords such as Ctrl+Arrow/PageUp must stay with the input even if a user
+// rebinds them to a global navigation action.
 export function actionAllowedInInput(actionId: string, combo: string): boolean {
   const base = combo.split('+').pop()
 
-  // A bare modifier (no key) is not a real chord — `comboFromEvent` never
-  // yields one, but reject it here so a malformed stored binding can't pass
-  // the shape-only mod/ctrl check below.
-  if (!base || base === 'mod' || base === 'ctrl' || TEXT_NAVIGATION_KEYS.has(base)) {
+  if (base && TEXT_NAVIGATION_KEYS.has(base)) {
     return false
-  }
-
-  if (/^(?:mod|ctrl)(?:\+|$)/.test(combo)) {
-    return true
   }
 
   return INPUT_SAFE_ACTIONS.has(actionId)

@@ -521,32 +521,13 @@ class HermesTokenStorage:
         if OAuthClientInformationFull is None and not _ensure_sdk_loaded():
             return None
         try:
-            info = OAuthClientInformationFull.model_validate(data)
-            # Some dynamic registration providers (notably Supabase MCP) return
-            # a client_secret but omit token_endpoint_auth_method. The MCP SDK
-            # defaults that missing field to "none", which causes token exchange
-            # to omit client_secret and fail with "Required parameter: client_secret".
-            # If a secret is present, use client_secret_post unless the provider
-            # explicitly saved a different method.
-            if getattr(info, "client_secret", None) and data.get("token_endpoint_auth_method") in (None, "none", ""):
-                data["token_endpoint_auth_method"] = "client_secret_post"
-                info = OAuthClientInformationFull.model_validate(data)
-                _write_json(self._client_info_path(), info.model_dump(mode="json", exclude_none=True))
-            return info
+            return OAuthClientInformationFull.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
             logger.warning("Corrupt client info at %s -- ignoring: %s", self._client_info_path(), exc)
             return None
 
     async def set_client_info(self, client_info: "OAuthClientInformationFull") -> None:
-        data = client_info.model_dump(mode="json", exclude_none=True)
-        # Supabase MCP dynamic client registration returns a client_secret but
-        # omits token_endpoint_auth_method. The MCP SDK defaults that to
-        # "none", which makes token exchange omit client_secret and loops the
-        # browser authorization page. Persist the effective method immediately
-        # so this flow and subsequent retries use client_secret_post.
-        if data.get("client_secret") and data.get("token_endpoint_auth_method") in (None, "none", ""):
-            data["token_endpoint_auth_method"] = "client_secret_post"
-        _write_json(self._client_info_path(), data)
+        _write_json(self._client_info_path(), client_info.model_dump(mode="json", exclude_none=True))
         logger.debug("OAuth client info saved for %s", self._server_name)
 
     # -- oauth server metadata --------------------------------------------
@@ -669,22 +650,6 @@ class HermesTokenStorage:
 # ---------------------------------------------------------------------------
 
 
-def _authorization_code_result(code: str, state: "str | None", iss: "str | None" = None):
-    """Package redirect parameters in the shape the installed SDK expects.
-
-    mcp 2.0 changed ``callback_handler``'s contract from a
-    ``tuple[str, str | None]`` to an ``AuthorizationCodeResult`` model, and the
-    SDK now reads ``result.state`` / ``result.iss`` off it — a tuple raises
-    ``AttributeError`` mid-flow. Fall back to the tuple when the model is
-    absent so the handler still satisfies an older SDK.
-    """
-    try:
-        from mcp.shared.auth import AuthorizationCodeResult
-    except ImportError:  # mcp < 2.0
-        return code, state
-    return AuthorizationCodeResult(code=code, state=state, iss=iss)
-
-
 def _make_callback_handler() -> tuple[type, dict]:
     """Create a per-flow callback HTTP handler class with its own result dict.
 
@@ -693,9 +658,7 @@ def _make_callback_handler() -> tuple[type, dict]:
     OAuth redirect arrives.  Each call returns a fresh pair so concurrent
     flows don't stomp on each other.
     """
-    result: dict[str, Any] = {
-        "auth_code": None, "state": None, "error": None, "iss": None,
-    }
+    result: dict[str, Any] = {"auth_code": None, "state": None, "error": None}
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -703,17 +666,10 @@ def _make_callback_handler() -> tuple[type, dict]:
             code = params.get("code", [None])[0]
             state = params.get("state", [None])[0]
             error = params.get("error", [None])[0]
-            # RFC 9207 authorization-response issuer. mcp 2.0 validates it
-            # against the discovered metadata and *rejects* a response that
-            # omits it when the authorization server advertised
-            # `authorization_response_iss_parameter_supported`, so dropping it
-            # here would break login against those providers.
-            iss = params.get("iss", [None])[0]
 
             result["auth_code"] = code
             result["state"] = state
             result["error"] = error
-            result["iss"] = iss
 
             body = (
                 "<html><body><h2>Authorization Successful</h2>"
@@ -856,13 +812,8 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     return await _make_callback_waiter(_oauth_port)()
 
 
-def _make_callback_waiter(port: int, timeout: float = 300.0):
+def _make_callback_waiter(port: int):
     """Return a callback waiter bound to a single OAuth flow's port.
-
-    ``timeout`` bounds how long the waiter polls for the redirect. It used to
-    be passed to ``OAuthClientProvider(timeout=...)`` as well, but mcp 2.0
-    dropped that constructor argument — the wait happens here, so this is now
-    the only place the configured ``oauth.timeout`` takes effect.
 
     Closing over the port (instead of reading the module-level
     ``_oauth_port``) keeps concurrent OAuth flows isolated: flow A's waiter
@@ -880,15 +831,12 @@ def _make_callback_waiter(port: int, timeout: float = 300.0):
             to complete the browser auth), or in non-interactive contexts.
     """
 
-    async def _wait():
+    async def _wait() -> tuple[str, str | None]:
         from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
 
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
-            # The dashboard flow still speaks the legacy tuple; normalize it
-            # here so both callback sources hand the SDK one shape.
-            dash_code, dash_state = await dashboard_flow.wait_for_callback()
-            return _authorization_code_result(dash_code, dash_state)
+            return await dashboard_flow.wait_for_callback()
 
         # Reject before binding the callback listener in non-interactive
         # contexts. Reaching here means the SDK entered the authorization-code
@@ -965,6 +913,7 @@ def _make_callback_waiter(port: int, timeout: float = 300.0):
             )
             paste_thread.start()
 
+        timeout = 300.0
         poll_interval = 0.5
         elapsed = 0.0
         try:
@@ -986,9 +935,7 @@ def _make_callback_waiter(port: int, timeout: float = 300.0):
                 "Ensure you completed the browser authorization flow."
             )
 
-        return _authorization_code_result(
-            result["auth_code"], result["state"], result.get("iss")
-        )
+        return result["auth_code"], result["state"]
 
     return _wait
 
@@ -1058,7 +1005,6 @@ def _paste_callback_reader(result: dict) -> None:
     code = params.get("code", [None])[0]
     state = params.get("state", [None])[0]
     error = params.get("error", [None])[0]
-    iss = params.get("iss", [None])[0]  # RFC 9207 — see _make_callback_handler
 
     if not code and not error:
         print(
@@ -1074,102 +1020,8 @@ def _paste_callback_reader(result: dict) -> None:
     result["auth_code"] = code
     result["state"] = state
     result["error"] = error
-    result["iss"] = iss
     if code:
         print("  Got authorization code from paste — completing flow.", file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# OAuth provider compatibility shims
-# ---------------------------------------------------------------------------
-
-
-HermesOAuthClientProvider: Any = None
-
-
-def _get_hermes_oauth_provider_class() -> type | None:
-    global HermesOAuthClientProvider
-    if HermesOAuthClientProvider is not None:
-        return HermesOAuthClientProvider
-    if not _ensure_sdk_loaded():
-        return None
-
-    class _HermesOAuthClientProvider(OAuthClientProvider):
-        """OAuth provider with pragmatic fixes for real-world MCP providers.
-
-        Supabase MCP dynamic registration returns ``client_secret`` but omits
-        ``token_endpoint_auth_method``. The upstream MCP SDK treats the missing
-        method as ``none`` and therefore omits ``client_secret`` from the token
-        request, causing Supabase to reject the exchange and the browser to show
-        the authorization page again. Coerce the in-memory client info right before
-        token/refresh requests as well as persisting the fixed shape in storage.
-        """
-
-        def _coerce_client_secret_post(self) -> None:
-            info = getattr(self.context, "client_info", None)
-            if not info or not getattr(info, "client_secret", None):
-                return
-            method = getattr(info, "token_endpoint_auth_method", None)
-            if method not in (None, "none", ""):
-                return
-            data = info.model_dump(mode="json", exclude_none=True)
-            data["token_endpoint_auth_method"] = "client_secret_post"
-            self.context.client_info = OAuthClientInformationFull.model_validate(data)
-
-        async def _exchange_token_authorization_code(self, *args: Any, **kwargs: Any):
-            self._coerce_client_secret_post()
-            return await super()._exchange_token_authorization_code(*args, **kwargs)
-
-        async def _refresh_token(self):
-            self._coerce_client_secret_post()
-            return await super()._refresh_token()
-
-        async def _handle_token_response(self, response):
-            """Accept any 2xx token response and avoid leaking token bodies in errors."""
-            if 200 <= response.status_code < 300:
-                from mcp.client.auth.utils import handle_token_response_scopes
-                from mcp.client.auth.oauth2 import OAuthTokenError
-                from httpx import HTTPError
-
-                try:
-                    token_response = await handle_token_response_scopes(response)
-                except (HTTPError, OAuthTokenError):
-                    raise OAuthTokenError("Invalid token response") from None
-                self.context.current_tokens = token_response
-                self.context.update_token_expiry(token_response)
-                await self.context.storage.set_tokens(token_response)
-                return
-
-            from mcp.client.auth.oauth2 import OAuthTokenError
-
-            raise OAuthTokenError(f"Token exchange failed ({response.status_code})")
-
-        async def _handle_refresh_response(self, response) -> bool:
-            """Accept any 2xx refresh response and avoid logging token bodies."""
-            if not (200 <= response.status_code < 300):
-                logger.warning("Token refresh failed: %s", response.status_code)
-                self.context.clear_tokens()
-                return False
-
-            from pydantic import ValidationError
-            from httpx import HTTPError
-
-            try:
-                content = await response.aread()
-                token_response = OAuthToken.model_validate_json(content)
-                self.context.current_tokens = token_response
-                self.context.update_token_expiry(token_response)
-                await self.context.storage.set_tokens(token_response)
-                return True
-            except (HTTPError, ValidationError):
-                logger.warning("Invalid refresh response: %s", response.status_code)
-                self.context.clear_tokens()
-                return False
-
-    _HermesOAuthClientProvider.__name__ = "HermesOAuthClientProvider"
-    _HermesOAuthClientProvider.__qualname__ = "HermesOAuthClientProvider"
-    HermesOAuthClientProvider = _HermesOAuthClientProvider
-    return HermesOAuthClientProvider
 
 
 # ---------------------------------------------------------------------------
@@ -1364,24 +1216,11 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": auth_method,
-        # SEP-837 (2026-07-28 spec): clients MUST declare an application_type
-        # during registration so OIDC-strict authorization servers stop
-        # rejecting loopback redirect_uris. Hermes is a CLI/desktop app
-        # redirecting to 127.0.0.1/localhost — that is exactly "native".
-        # Overridable for the rare hosted-dashboard deployment fronting a
-        # real https redirect.
-        "application_type": cfg.get("application_type", "native"),
     }
     if scope:
         metadata_kwargs["scope"] = scope
 
-    try:
-        return OAuthClientMetadata.model_validate(metadata_kwargs)
-    except Exception:
-        # mcp 1.x metadata models predate SEP-837 and reject the unknown
-        # field — retry without it rather than failing the whole flow.
-        metadata_kwargs.pop("application_type", None)
-        return OAuthClientMetadata.model_validate(metadata_kwargs)
+    return OAuthClientMetadata.model_validate(metadata_kwargs)
 
 
 def _invalidate_tokens_on_client_change(
@@ -1579,25 +1418,13 @@ def build_oauth_auth(
     redirect_handler = _make_redirect_handler(
         resolved_port, redirect_uri=cfg.get("redirect_uri") or None
     )
-    callback_handler = _make_callback_waiter(
-        resolved_port, timeout=float(cfg.get("timeout", 300))
-    )
+    callback_handler = _make_callback_waiter(resolved_port)
 
-    provider_class = _get_hermes_oauth_provider_class()
-    if provider_class is None:
-        logger.warning(
-            "MCP OAuth requested for '%s' but the provider class is unavailable",
-            server_name,
-        )
-        return None
-
-    return provider_class(
+    return OAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
         redirect_handler=redirect_handler,
-        # mcp 2.0 removed the provider's own `timeout` argument; the configured
-        # `oauth.timeout` is applied inside the callback waiter above, which is
-        # where the browser round-trip is actually awaited.
         callback_handler=callback_handler,
+        timeout=float(cfg.get("timeout", 300)),
     )

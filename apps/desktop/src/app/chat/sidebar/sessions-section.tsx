@@ -104,7 +104,6 @@ interface SidebarSessionsSectionProps {
   onArchiveSession: (sessionId: string) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
   onTogglePin: (sessionId: string) => void
-  onToggleUnread: (sessionId: string) => void
   onNewSessionInWorkspace?: (path: null | string) => void
   pinned: boolean
   rootClassName?: string
@@ -182,7 +181,6 @@ export function SidebarSessionsSection({
   onArchiveSession,
   onBranchSession,
   onTogglePin,
-  onToggleUnread,
   onNewSessionInWorkspace,
   pinned,
   rootClassName,
@@ -258,12 +256,10 @@ export function SidebarSessionsSection({
         onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
         onDelete: () => onDeleteSession(session.id),
         onPin: () => onTogglePin(sessionPinId(session)),
-        onToggleUnread: () => onToggleUnread(session.id),
         onResume: () => onResumeSession(session.id),
         reorderable: draggable && !branchStem,
         session,
-        showProfile: showProfileTags,
-        unread: session.unread === true
+        showProfile: showProfileTags
       }
 
       return draggable && !branchStem ? (
@@ -280,7 +276,6 @@ export function SidebarSessionsSection({
       onDeleteSession,
       onResumeSession,
       onTogglePin,
-      onToggleUnread,
       pinned,
       showProfileTags
     ]
@@ -465,7 +460,6 @@ export function SidebarSessionsSection({
         onDeleteSession={onDeleteSession}
         onResumeSession={onResumeSession}
         onTogglePin={onTogglePin}
-        onToggleUnread={onToggleUnread}
         pinned={pinned}
         rows={flatRows}
         showProfileTags={showProfileTags}
@@ -522,11 +516,9 @@ interface SortableSessionRowProps {
   session: SessionInfo
   isPinned: boolean
   isSelected: boolean
-  unread: boolean
   onArchive: () => void
   onDelete: () => void
   onPin: () => void
-  onToggleUnread: () => void
   onResume: () => void
 }
 

@@ -249,7 +249,7 @@ def test_relay_rewrite_precedes_sequential_policy_approval_checkpoint_and_dispat
     def observe_plugin(name, args, **kwargs):
         del kwargs
         observed["plugin"].append((name, dict(args)))
-        return (None, None)
+        return None
 
     def observe_approval(name, args):
         observed["approval"].append((name, dict(args)))
@@ -274,7 +274,7 @@ def test_relay_rewrite_precedes_sequential_policy_approval_checkpoint_and_dispat
     with (
         patch("agent.relay_tools.execute", side_effect=relay_execute),
         patch(
-            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            "hermes_cli.plugins.resolve_pre_tool_block",
             side_effect=observe_plugin,
         ),
         patch.object(agent._tool_guardrails, "before_call", side_effect=observe_guardrail),
@@ -331,10 +331,7 @@ def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     messages = []
 
     with (
-        patch(
-            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
-            return_value=("plugin policy", None),
-        ),
+        patch("hermes_cli.plugins.resolve_pre_tool_block", return_value="plugin policy"),
         patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc,
     ):
         agent._execute_tool_calls_sequential(msg, messages, "task-1")

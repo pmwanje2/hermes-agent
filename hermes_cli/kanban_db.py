@@ -102,6 +102,12 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
+# Card Acceptance Oracle kinds stored on ``tasks.oracle_kind``. Advisory
+# recording only — a worker can write these columns and ``task_oracle_runs``
+# directly. Unknown values are rejected at create so we do not persist a
+# command the runner cannot classify.
+ORACLE_KINDS = frozenset({"jest", "tsc", "shell", "none"})
+
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
 # instead of all landing in one undifferentiated ``blocked`` bucket that a cron
@@ -845,6 +851,10 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "icon": "",
         "color": "",
         "default_workdir": None,
+        # Optional Card Acceptance Oracle stamped onto every new card
+        # (kind/cmd/timeout_s/image). Explicit create-time oracle_* wins;
+        # absence of this key stamps kind:none + an auto-waiver.
+        "default_oracle": None,
         # Optional first-class Project this board is scoped to. When set, new
         # tasks inherit it (deterministic worktree + branch under the project's
         # primary repo) and ``default_workdir`` mirrors the project's primary
@@ -877,6 +887,7 @@ def write_board_metadata(
     color: Optional[str] = None,
     archived: Optional[bool] = None,
     default_workdir: Optional[str] = None,
+    default_oracle: Optional[dict] = None,
     project_id: Optional[str] = None,
 ) -> dict:
     """Create / update ``board.json`` for ``board``.
@@ -887,6 +898,10 @@ def write_board_metadata(
     ``project_id``: ``None`` leaves it unchanged; empty string clears the
     project scope; a value sets it (not validated here — the caller resolves
     it against ``projects_db``).
+
+    ``default_oracle``: ``None`` leaves it unchanged; empty dict clears it;
+    a mapping is stored as-is (kind/cmd/timeout_s/image). Read at
+    ``create_task`` the same way ``default_workdir`` is inherited.
     """
     _assert_not_delegated_child_mutation()
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
@@ -906,6 +921,8 @@ def write_board_metadata(
         meta["archived"] = bool(archived)
     if default_workdir is not None:
         meta["default_workdir"] = str(default_workdir) if default_workdir else None
+    if default_oracle is not None:
+        meta["default_oracle"] = default_oracle or None
     if project_id is not None:
         meta["project_id"] = str(project_id) if project_id else None
     if not meta.get("created_at"):
@@ -1141,6 +1158,14 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Card Acceptance Oracle declaration (advisory / recorded). None means
+    # the card has no oracle and complete_task does not invoke the runner.
+    # A worker can write these columns directly — they are not a gate.
+    oracle_kind: Optional[str] = None
+    oracle_cmd: Optional[str] = None
+    oracle_timeout_s: Optional[int] = None
+    oracle_image: Optional[str] = None
+    oracle_waiver_reason: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1234,6 +1259,31 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            oracle_kind=(
+                row["oracle_kind"]
+                if "oracle_kind" in keys and row["oracle_kind"]
+                else None
+            ),
+            oracle_cmd=(
+                row["oracle_cmd"]
+                if "oracle_cmd" in keys and row["oracle_cmd"]
+                else None
+            ),
+            oracle_timeout_s=(
+                int(row["oracle_timeout_s"])
+                if "oracle_timeout_s" in keys and row["oracle_timeout_s"] is not None
+                else None
+            ),
+            oracle_image=(
+                row["oracle_image"]
+                if "oracle_image" in keys and row["oracle_image"]
+                else None
+            ),
+            oracle_waiver_reason=(
+                row["oracle_waiver_reason"]
+                if "oracle_waiver_reason" in keys and row["oracle_waiver_reason"]
+                else None
             ),
         )
 
@@ -1422,7 +1472,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Card Acceptance Oracle declaration (honesty-gate receipt, not a
+    -- security boundary). NULL on every pre-CAO row. Enforcement lives
+    -- elsewhere; these columns only record what the card declared.
+    oracle_kind          TEXT,
+    oracle_cmd           TEXT,
+    oracle_timeout_s     INTEGER,
+    oracle_image         TEXT,
+    oracle_waiver_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1514,6 +1572,24 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- Recorded Card Acceptance Oracle receipts. Append-only; one row per
+-- invocation. This is an honesty-gate audit trail, not a host-only store.
+CREATE TABLE IF NOT EXISTS task_oracle_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    run_id       INTEGER,
+    kind         TEXT NOT NULL,
+    cmd          TEXT NOT NULL,
+    image        TEXT,
+    head_sha     TEXT,
+    tree_hash    TEXT,
+    started_at   INTEGER NOT NULL,
+    ended_at     INTEGER,
+    rc           INTEGER,
+    log_path     TEXT,
+    invoked_by   TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1524,6 +1600,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_oracle_task           ON task_oracle_runs(task_id, started_at);
 """
 
 
@@ -2679,6 +2756,50 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    # Card Acceptance Oracle declaration columns. Additive only — never
+    # rewrite ``tasks``. Existing rows stay NULL (no declared oracle).
+    if "oracle_kind" not in cols:
+        _add_column_if_missing(conn, "tasks", "oracle_kind", "oracle_kind TEXT")
+    if "oracle_cmd" not in cols:
+        _add_column_if_missing(conn, "tasks", "oracle_cmd", "oracle_cmd TEXT")
+    if "oracle_timeout_s" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "oracle_timeout_s", "oracle_timeout_s INTEGER"
+        )
+    if "oracle_image" not in cols:
+        _add_column_if_missing(conn, "tasks", "oracle_image", "oracle_image TEXT")
+    if "oracle_waiver_reason" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "oracle_waiver_reason", "oracle_waiver_reason TEXT"
+        )
+
+    # New receipt table on boards that predate CAO. CREATE TABLE IF NOT
+    # EXISTS is a no-op on fresh DBs (SCHEMA_SQL already created it) and
+    # on a second migrate pass.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_oracle_runs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id      TEXT NOT NULL,
+            run_id       INTEGER,
+            kind         TEXT NOT NULL,
+            cmd          TEXT NOT NULL,
+            image        TEXT,
+            head_sha     TEXT,
+            tree_hash    TEXT,
+            started_at   INTEGER NOT NULL,
+            ended_at     INTEGER,
+            rc           INTEGER,
+            log_path     TEXT,
+            invoked_by   TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_oracle_task "
+        "ON task_oracle_runs(task_id, started_at)"
+    )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3183,6 +3304,11 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    oracle_kind: Optional[str] = None,
+    oracle_cmd: Optional[str] = None,
+    oracle_timeout_s: Optional[int] = None,
+    oracle_image: Optional[str] = None,
+    oracle_waiver_reason: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3222,7 +3348,24 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``oracle_kind`` / ``oracle_cmd`` / ``oracle_timeout_s`` / ``oracle_image``
+    / ``oracle_waiver_reason`` are optional Card Acceptance Oracle fields.
+    Precedence: explicit create-time values, then the board's
+    ``default_oracle``, then ``kind:none`` + an auto-generated waiver.
+    They are recorded / advisory only — a worker can write these columns
+    (and ``task_oracle_runs``) directly. Phase 1 never refuses completion.
     """
+    oracle_kind, oracle_cmd, oracle_timeout_s, oracle_image, oracle_waiver_reason = (
+        _resolve_create_oracle(
+            board=board,
+            oracle_kind=oracle_kind,
+            oracle_cmd=oracle_cmd,
+            oracle_timeout_s=oracle_timeout_s,
+            oracle_image=oracle_image,
+            oracle_waiver_reason=oracle_waiver_reason,
+        )
+    )
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -3497,8 +3640,10 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id,
+                        oracle_kind, oracle_cmd, oracle_timeout_s,
+                        oracle_image, oracle_waiver_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3524,6 +3669,11 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        oracle_kind,
+                        oracle_cmd,
+                        oracle_timeout_s,
+                        oracle_image,
+                        oracle_waiver_reason,
                     ),
                 )
                 for pid in parents:
@@ -3535,24 +3685,31 @@ def create_task(
                 # still hears about a child that BLOCKs, not just the final
                 # fan-in) is handled by the single-owner helper below —
                 # _inherit_notify_subs copies every routing/delivery column.
+                created_payload = {
+                    "assignee": assignee,
+                    "status": task_status,
+                    "parents": list(parents),
+                    "tenant": tenant,
+                    "workspace_kind": workspace_kind,
+                    "workspace_path": workspace_path,
+                    "branch_name": branch_name,
+                    "project_id": project_id,
+                    "skills": list(skills_list) if skills_list else None,
+                    "goal_mode": bool(goal_mode) or None,
+                    "model_override": model_override,
+                    "provider_override": provider_override,
+                }
+                if oracle_kind is not None:
+                    created_payload["oracle_kind"] = oracle_kind
+                    created_payload["oracle_cmd"] = oracle_cmd
+                    created_payload["oracle_timeout_s"] = oracle_timeout_s
+                    created_payload["oracle_image"] = oracle_image
+                    created_payload["oracle_waiver_reason"] = oracle_waiver_reason
                 _append_event(
                     conn,
                     task_id,
                     "created",
-                    {
-                        "assignee": assignee,
-                        "status": task_status,
-                        "parents": list(parents),
-                        "tenant": tenant,
-                        "workspace_kind": workspace_kind,
-                        "workspace_path": workspace_path,
-                        "branch_name": branch_name,
-                        "project_id": project_id,
-                        "skills": list(skills_list) if skills_list else None,
-                        "goal_mode": bool(goal_mode) or None,
-                        "model_override": model_override,
-                        "provider_override": provider_override,
-                    },
+                    created_payload,
                 )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
@@ -3562,6 +3719,116 @@ def create_task(
             # Retry with a fresh id.
             continue
     raise RuntimeError("unreachable")
+
+
+def _board_default_oracle(board: Optional[str]) -> Optional[dict]:
+    """Return ``board.json`` ``default_oracle`` if it is a mapping, else None."""
+    try:
+        slug = board if board else get_current_board()
+        raw = read_board_metadata(slug).get("default_oracle")
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _resolve_create_oracle(
+    *,
+    board: Optional[str],
+    oracle_kind: Optional[str],
+    oracle_cmd: Optional[str],
+    oracle_timeout_s: Optional[int],
+    oracle_image: Optional[str],
+    oracle_waiver_reason: Optional[str],
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[str],
+    Optional[str],
+]:
+    """Stamp an oracle at create: explicit > board default > none+waiver."""
+    explicit = any(
+        v is not None
+        for v in (
+            oracle_kind,
+            oracle_cmd,
+            oracle_timeout_s,
+            oracle_image,
+            oracle_waiver_reason,
+        )
+    )
+    if not explicit:
+        default = _board_default_oracle(board)
+        if default:
+            oracle_kind = default.get("kind")
+            oracle_cmd = default.get("cmd")
+            oracle_timeout_s = default.get("timeout_s")
+            oracle_image = default.get("image")
+            oracle_waiver_reason = default.get("waiver_reason")
+        else:
+            try:
+                slug = (board if board else get_current_board()) or "unknown"
+            except Exception:
+                slug = "unknown"
+            oracle_kind = "none"
+            oracle_waiver_reason = f"auto: no board default for {slug}"
+    return _normalize_oracle_declaration(
+        oracle_kind=oracle_kind,
+        oracle_cmd=oracle_cmd,
+        oracle_timeout_s=oracle_timeout_s,
+        oracle_image=oracle_image,
+        oracle_waiver_reason=oracle_waiver_reason,
+    )
+
+
+def _normalize_oracle_declaration(
+    *,
+    oracle_kind: Optional[str],
+    oracle_cmd: Optional[str],
+    oracle_timeout_s: Optional[int],
+    oracle_image: Optional[str],
+    oracle_waiver_reason: Optional[str],
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[str],
+    Optional[str],
+]:
+    """Normalize optional oracle fields for ``create_task``.
+
+    All omitted → all None (today's behaviour). A declared kind must be
+    one of ``ORACLE_KINDS``. This is create-time validation only — it
+    does not refuse completion.
+    """
+    kind = (str(oracle_kind).strip().lower() if oracle_kind is not None else "") or None
+    cmd = (str(oracle_cmd).strip() if oracle_cmd is not None else "") or None
+    image = (str(oracle_image).strip() if oracle_image is not None else "") or None
+    waiver = (
+        str(oracle_waiver_reason).strip() if oracle_waiver_reason is not None else ""
+    ) or None
+    timeout: Optional[int] = None
+    if oracle_timeout_s is not None:
+        try:
+            timeout = int(oracle_timeout_s)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("oracle_timeout_s must be an integer") from exc
+        if timeout <= 0:
+            raise ValueError("oracle_timeout_s must be > 0")
+    any_set = any(v is not None for v in (kind, cmd, timeout, image, waiver))
+    if not any_set:
+        return None, None, None, None, None
+    if kind is None:
+        raise ValueError("oracle_kind is required when any oracle_* field is set")
+    if kind not in ORACLE_KINDS:
+        raise ValueError(
+            f"oracle_kind must be one of {sorted(ORACLE_KINDS)}, got {kind!r}"
+        )
+    if kind == "none" and not waiver:
+        raise ValueError(
+            "oracle_waiver_reason is required when oracle_kind is 'none'"
+        )
+    return kind, cmd, timeout, image, waiver
 
 
 def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> list[str]:
@@ -5391,6 +5658,13 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
+
+    If the card declares an oracle (``tasks.oracle_kind`` is set), the
+    runner is invoked best-effort before the write txn and a receipt is
+    recorded on ``task_oracle_runs`` plus the ``completed`` event. Phase 1
+    is recording only: a red or exploding runner never refuses completion.
+    A worker can write ``task_oracle_runs`` directly — the receipt is
+    advisory, not a security boundary.
     """
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-check inside the
@@ -5428,6 +5702,10 @@ def complete_task(
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    metadata = _merge_well_known_scratch_evidence(conn, task_id, metadata)
+    # Advisory recording only. Never refuse. A raising runner is swallowed
+    # the same way ``_fire_kanban_lifecycle_hook`` swallows observer errors.
+    oracle_receipt = _record_completion_oracle(conn, task_id)
     with write_txn(conn):
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
@@ -5544,6 +5822,17 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+        # Advisory only. A malformed receipt must never refuse completion.
+        try:
+            oracle_event = _oracle_receipt_public(oracle_receipt)
+        except Exception as exc:
+            _log.debug(
+                "oracle receipt public view failed for %s (advisory): %s",
+                task_id, exc,
+            )
+            oracle_event = None
+        if oracle_event:
+            completed_payload["oracle"] = oracle_event
         _append_event(
             conn, task_id, "completed",
             completed_payload,
@@ -5592,6 +5881,91 @@ def complete_task(
     return True
 
 
+def _oracle_receipt_public(receipt: Optional[Mapping[str, Any]]) -> Optional[dict]:
+    """Slim advisory view of a recorded receipt for events / show output.
+
+    Never raises. A truthy non-Mapping (str / list / int / dataclass)
+    must not escape into ``complete_task`` as ``AttributeError``.
+    """
+    if not receipt:
+        return None
+    if not isinstance(receipt, Mapping):
+        _log.debug(
+            "oracle receipt is not a mapping (advisory): %s",
+            type(receipt).__name__,
+        )
+        return None
+    try:
+        return {
+            "id": receipt.get("id"),
+            "kind": receipt.get("kind"),
+            "cmd": receipt.get("cmd"),
+            "rc": receipt.get("rc"),
+            "log_path": receipt.get("log_path"),
+            "image": receipt.get("image"),
+            "head_sha": receipt.get("head_sha"),
+            "invoked_by": receipt.get("invoked_by"),
+        }
+    except Exception as exc:
+        _log.debug("oracle receipt public view failed (advisory): %s", exc)
+        return None
+
+
+def _record_completion_oracle(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Best-effort: run the declared oracle and record a receipt.
+
+    Phase 1 is recording only. Missing / undeclared oracles are a no-op.
+    Runner exceptions are logged and swallowed — they must never refuse
+    or break ``complete_task``. A worker can write ``task_oracle_runs``
+    directly; this is advisory, not a security boundary.
+
+    KILL SWITCH: ``kanban.oracle_enabled: false`` in config.yaml disables the
+    runner entirely without a redeploy. The health watchdog flips it
+    automatically when the observed failure rate breaches its threshold; a
+    human can flip it back. Checked first so a disabled oracle costs one
+    config read and nothing else.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        _kan = (load_config() or {}).get("kanban") or {}
+        if not _kan.get("oracle_enabled", True):
+            return None
+    except Exception as exc:  # never let a config read break completion
+        _log.debug("oracle kill-switch read failed (continuing): %s", exc)
+    try:
+        row = conn.execute(
+            "SELECT oracle_kind FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    except Exception as exc:
+        _log.debug("oracle declaration read failed for %s: %s", task_id, exc)
+        return None
+    if row is None:
+        return None
+    kind = row["oracle_kind"] if "oracle_kind" in row.keys() else None
+    if not kind:
+        return None
+    try:
+        from hermes_cli.kanban_oracle import run_oracle
+
+        invoked_by = os.environ.get("HERMES_PROFILE") or "complete_task"
+        result = run_oracle(conn, task_id, invoked_by=invoked_by)
+        if result is None:
+            return None
+        if not isinstance(result, Mapping):
+            _log.debug(
+                "oracle runner returned non-mapping for %s (advisory): %s",
+                task_id, type(result).__name__,
+            )
+            return None
+        return dict(result)
+    except Exception as exc:
+        _log.debug("oracle runner failed for %s (advisory): %s", task_id, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Workspace / tmux cleanup
 # ---------------------------------------------------------------------------
@@ -5630,6 +6004,91 @@ def _merge_completion_prose_artifacts(
         candidate = Path(raw)
         if candidate.is_file():
             discovered.append(str(candidate))
+    if not discovered:
+        return metadata
+    updated = dict(metadata) if isinstance(metadata, dict) else {}
+    existing = updated.get("artifacts")
+    merged = list(existing) if isinstance(existing, (list, tuple)) else []
+    seen = {str(path) for path in merged}
+    for path in discovered:
+        if path not in seen:
+            merged.append(path)
+            seen.add(path)
+    updated["artifacts"] = merged
+    return updated
+
+
+# Root-level files the Maximus integrity watchdog already treats as evidence
+# (plus ``.log``, the usual gate-receipt suffix). Scratch workspaces are
+# deleted on complete; if a worker writes one of these at the workspace root
+# and forgets ``artifacts=`` / ``kanban_attach``, the file still has to
+# survive. Root-only — never walk the tree (a scratch dir can contain a
+# cloned repo). Dotfiles and secret-shaped names are skipped.
+_WELL_KNOWN_EVIDENCE_SUFFIXES = (".md", ".json", ".log", ".patch", ".mjs", ".py")
+_WELL_KNOWN_EVIDENCE_SECRET_TOKENS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "credential",
+    ".env",
+)
+
+
+def _is_well_known_evidence_filename(name: str) -> bool:
+    """Return True if *name* is a root-level gate/evidence artifact."""
+    leaf = Path(name).name
+    if not leaf or leaf.startswith("."):
+        return False
+    lower = leaf.lower()
+    if any(token in lower for token in _WELL_KNOWN_EVIDENCE_SECRET_TOKENS):
+        return False
+    return lower.endswith(_WELL_KNOWN_EVIDENCE_SUFFIXES)
+
+
+def _discover_well_known_scratch_evidence(workspace: Path) -> list[str]:
+    """List well-known evidence files sitting at the scratch workspace root."""
+    if not workspace.is_dir():
+        return []
+    try:
+        entries = list(workspace.iterdir())
+    except OSError:
+        return []
+    found: list[str] = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        if _is_well_known_evidence_filename(entry.name):
+            found.append(str(entry))
+    found.sort()
+    return found
+
+
+def _merge_well_known_scratch_evidence(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+) -> Optional[dict]:
+    """Promote well-known scratch evidence files even when undeclared.
+
+    Workers are still expected to pass ``artifacts=[...]`` or call
+    ``kanban_attach``. This merge is the fail-closed backup so a forgotten
+    ``EVIDENCE.md`` / ``MERGED-VERDICT.md`` is not destroyed by
+    ``_cleanup_workspace`` the instant the card turns green.
+    """
+    row = conn.execute(
+        "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+        return metadata
+    workspace = Path(row["workspace_path"]).expanduser()
+    if not _is_managed_scratch_path(workspace):
+        return metadata
+    discovered = _discover_well_known_scratch_evidence(workspace)
     if not discovered:
         return metadata
     updated = dict(metadata) if isinstance(metadata, dict) else {}
@@ -5880,20 +6339,19 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
     Called from :func:`complete_task` after the DB transaction commits.
     Best-effort — any error is swallowed so cleanup never blocks task completion.
-    ``scratch`` workspaces are removed; ``worktree`` workspaces are removed only
-    when provably free of work (clean tree, every commit reachable from a
-    remote-tracking ref); ``dir`` workspaces are intentionally preserved.
+    Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
+    are intentionally preserved.
     """
     try:
         row = conn.execute(
-            "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?",
+            "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if not row:
             return
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
-        if kind not in ("scratch", "worktree") or not path:
+        if kind != "scratch" or not path:
             # This task's own workspace isn't a removable scratch dir, but its
             # completion may still unblock a deferred parent scratch cleanup
             # (e.g. a 'dir' child whose scratch parent was waiting on it). #33774
@@ -5901,7 +6359,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             return
         # Check if this task has children that still need the workspace.
         # If any child is not yet done/archived, defer cleanup so the
-        # child can read handoff artifacts from the workspace (#33774).
+        # child can read handoff artifacts from the scratch dir (#33774).
         _active_children = conn.execute(
             "SELECT 1 FROM task_links l "
             "JOIN tasks t ON t.id = l.child_id "
@@ -5911,18 +6369,10 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         ).fetchone()
         if _active_children:
             _log.debug(
-                "Deferring %s workspace cleanup for task %s: "
+                "Deferring scratch workspace cleanup for task %s: "
                 "active children still need workspace at %s",
-                kind, task_id, path,
+                task_id, path,
             )
-            return
-        if kind == "worktree":
-            # Kill the (dead) tmux worker session BEFORE removing the
-            # worktree so a lingering worker never has its cwd deleted out
-            # from under it. Both steps stay best-effort.
-            _cleanup_worker_tmux(conn, task_id)
-            _cleanup_worktree_workspace(task_id, path, row["branch_name"])
-            _try_cleanup_parent_workspaces(conn, task_id)
             return
         import shutil
         wp = Path(path)
@@ -5953,69 +6403,6 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         pass  # best-effort — never block completion
 
 
-def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
-) -> None:
-    """Remove a finished task's linked git worktree when it holds no work.
-
-    Mirrors the safety judgment of the CLI startup pruner
-    (``cli._prune_stale_worktrees``): removal requires a clean working tree
-    AND every commit reachable from a remote-tracking ref. Any doubt — dirty
-    files, unpushed commits, unresolvable repo, failing git — preserves the
-    worktree. The task's auto-generated ``wt/<task-id>`` branch is deleted
-    with it; custom branches are kept. Best-effort like the scratch path.
-    """
-    try:
-        from cli import _worktree_has_unpushed_commits, _worktree_is_dirty
-    except Exception:
-        return  # CLI safety predicates unavailable — preserve
-    try:
-        wp = Path(path).expanduser()
-        if not wp.is_dir():
-            return
-        common = _git_common_dir(wp)
-        if common is None or common.name != ".git":
-            return  # not a linked worktree of a normal repo — never guess
-        repo_root = common.parent
-        if wp.resolve(strict=False) == repo_root.resolve(strict=False):
-            return  # never remove the main checkout
-        if _worktree_is_dirty(str(wp)) or _worktree_has_unpushed_commits(str(wp)):
-            _log.info(
-                "Preserving worktree for task %s: dirty or unpushed work at %s",
-                task_id, wp,
-            )
-            return
-        # No --force: the dirty/unpushed checks above run before removal, so
-        # git's own dirty guard re-verifies at removal time. If the tree
-        # became dirty between our check and the removal (TOCTOU), removal
-        # fails safe and the worktree is preserved.
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "remove", str(wp)],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=60,
-            check=False,
-        )
-        if result.returncode != 0:
-            _log.warning(
-                "git worktree remove failed for task %s at %s: %s",
-                task_id, wp, (result.stderr or result.stdout or "").strip(),
-            )
-            return
-        _log.debug("Removed worktree workspace: %s", wp)
-        branch = (branch_name or "").strip() or f"wt/{task_id}"
-        if branch.startswith("wt/"):
-            subprocess.run(
-                ["git", "-C", str(repo_root), "branch", "-D", branch],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=30,
-                check=False,
-            )
-    except Exception:
-        pass  # best-effort — never block completion
-
-
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
     """Clean up parent scratch workspaces now that *task_id* completed.
 
@@ -6031,14 +6418,10 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
         ).fetchall()
         for (parent_id,) in parents:
             row = conn.execute(
-                "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?",
+                "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
                 (parent_id,),
             ).fetchone()
-            if (
-                not row
-                or row["workspace_kind"] not in ("scratch", "worktree")
-                or not row["workspace_path"]
-            ):
+            if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
                 continue
             # Check if ALL children of this parent are terminal
             active = conn.execute(
@@ -6051,11 +6434,6 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if active:
                 continue  # still has active children
             # All children done — safe to clean up parent workspace
-            if row["workspace_kind"] == "worktree":
-                _cleanup_worktree_workspace(
-                    parent_id, row["workspace_path"], row["branch_name"]
-                )
-                continue
             import shutil
             wp = Path(row["workspace_path"])
             if wp.is_dir() and _is_managed_scratch_path(wp):
@@ -7533,9 +7911,6 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     # Promote newly-unblocked dependents immediately instead of waiting
     # for a later dispatcher tick.
     recompute_ready(conn)
-    # Reap the workspace on archive too — tasks archived without ever
-    # completing previously kept their scratch dir / worktree forever.
-    _cleanup_workspace(conn, task_id)
     return True
 
 
@@ -8075,13 +8450,6 @@ class DispatchResult:
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
-    memory_pressure: Optional[str] = None
-    """System memory pressure observed at spawn time when the memory guard
-    restricted this tick (OOF-30/OOF-77): ``"critical"`` — no new workers
-    were spawned this tick; ``"elevated"`` — at most one new worker was
-    spawned. ``None`` when memory was fine/unknown and the guard imposed
-    no restriction. Reclaim/promotion bookkeeping still ran either way;
-    deferred tasks stay queued for the next tick."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -9637,201 +10005,6 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
-# ---------------------------------------------------------------------------
-# Memory-aware dispatch guard (OOF-30 / OOF-77)
-#
-# Two production incidents ("larrikin-lollies", "synclare-task-manager")
-# followed the same shape: no ``kanban.max_in_progress`` configured, a busy
-# board, and a 1 GiB VM — the dispatcher fanned out 26-31 concurrent workers,
-# the host went into swap-thrash/OOM, and the dashboard (and everything else
-# on the machine) became unreachable. Two complementary safeguards:
-#
-#   1. A memory-DERIVED default concurrency cap when the operator never set
-#      ``kanban.max_in_progress`` (``resolve_max_in_progress``) — sized from
-#      MemTotal so a 1 GiB VM defaults to 2 workers, not unlimited.
-#   2. A live memory-PRESSURE guard inside the dispatch tick itself
-#      (``_memory_pressure_level``) — even a correctly-sized static cap can't
-#      see other tenants of the box, so under real observed pressure the
-#      dispatcher stops adding workers regardless of configured caps.
-#
-# Both fail open: on non-Linux hosts or any read error the sample is empty,
-# the derived default is None (no cap — unchanged behaviour), and the
-# pressure level is "unknown" (no spawn restriction).
-# ---------------------------------------------------------------------------
-
-# Assumed per-worker memory footprint for the derived default cap. Hermes
-# workers are full agent processes (Python + model client + tool subprocesses);
-# ~512 MiB is a deliberately conservative planning number so the derived cap
-# errs toward fewer workers on small VMs.
-MEMORY_GUARD_MB_PER_WORKER = 512
-# Bounds for the derived default: never below 2 (a board must still make
-# progress on the smallest hosted VM) and never above 8 (operators who want
-# more fan-out on big iron should say so explicitly in config).
-DERIVED_MAX_IN_PROGRESS_FLOOR = 2
-DERIVED_MAX_IN_PROGRESS_CEILING = 8
-
-
-def _system_memory_sample() -> dict:
-    """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
-
-    Delegates to :func:`gateway.lifecycle_ledger.sample_memory` (pure /proc
-    reads, Linux-only, never raises). Local import keeps ``kanban_db``
-    importable in stripped-down environments without the gateway package.
-    Module-level indirection is also the test seam — the shared conftest
-    patches this to ``{}`` so suite results don't depend on the CI runner's
-    live memory state.
-    """
-    try:
-        from gateway.lifecycle_ledger import sample_memory
-        return sample_memory() or {}
-    except Exception:
-        return {}
-
-
-def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
-    """Memory-derived default for ``kanban.max_in_progress`` when unset.
-
-    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)`` — e.g.
-    a 1 GiB VM derives 2, a 4 GiB VM derives 8. Returns ``None`` (no cap,
-    pre-fix behaviour) when total memory can't be determined, so dev
-    machines on macOS/Windows are unaffected.
-    """
-    if sample is None:
-        sample = _system_memory_sample()
-    total_kib = sample.get("mem_total_kib")
-    if isinstance(total_kib, bool) or not isinstance(total_kib, int) or total_kib <= 0:
-        return None
-    workers = (total_kib // 1024) // MEMORY_GUARD_MB_PER_WORKER
-    return max(
-        DERIVED_MAX_IN_PROGRESS_FLOOR,
-        min(workers, DERIVED_MAX_IN_PROGRESS_CEILING),
-    )
-
-
-def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
-    """Return the effective global concurrency cap for a dispatch tick.
-
-    An explicit operator-configured value always wins. When unset, fall back
-    to the memory-derived default (see :func:`derive_default_max_in_progress`).
-    Callers that parse config (gateway dispatcher, ``hermes kanban dispatch``)
-    should route through this so both paths agree.
-    """
-    if configured is not None:
-        return configured
-    return derive_default_max_in_progress()
-
-
-def configured_max_in_progress() -> Optional[int]:
-    """Read ``kanban.max_in_progress`` from config, or None when unset/invalid.
-
-    Small shared parser so every dispatch entry point (gateway watcher, CLI
-    dispatch, standalone daemon) agrees on what "explicitly configured"
-    means: a positive integer wins, anything else falls through to the
-    memory-derived default via :func:`resolve_max_in_progress`.
-    """
-    try:
-        from hermes_cli.config import load_config_readonly
-        raw = (load_config_readonly() or {}).get("kanban", {}).get(
-            "max_in_progress"
-        )
-    except Exception:
-        return None
-    if raw is None:
-        return None
-    try:
-        ival = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return ival if ival >= 1 else None
-
-
-def count_running_tasks(conn: sqlite3.Connection) -> int:
-    """Return the number of tasks currently in ``status='running'``.
-
-    Used by the gateway's multi-board sweep to account for workers on
-    OTHER boards against the host-level concurrency budget (OOF-30): the
-    memory-derived cap bounds the machine, so each board's tick must see
-    the machine's total, not just its own. Fails open to 0 — a broken
-    board must not brick dispatch on healthy ones (corruption is handled
-    separately by the watcher's quarantine logic).
-    """
-    try:
-        return int(
-            conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-            ).fetchone()[0]
-        )
-    except Exception:
-        return 0
-
-
-def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
-    """Total ``running`` tasks across every board EXCEPT ``board``.
-
-    The concurrency caps bound the HOST (workers are OS processes sharing
-    one machine's memory), but each board's dispatch tick only sees its own
-    DB. Without this, a memory-derived cap of N gets multiplied by the
-    number of active boards — reproduced in review of OOF-30: two boards
-    each spawned N workers on a derived N-worker host budget.
-
-    Boards are matched by resolved DB path, so the ``HERMES_KANBAN_DB``
-    override (which pins every board to one file) naturally yields 0.
-    Fails open per board: one broken/corrupt board must not brick dispatch
-    on the healthy ones.
-    """
-    try:
-        current_path = str(kanban_db_path(board=board).expanduser().resolve())
-    except Exception:
-        current_path = None
-    try:
-        boards = list_boards(include_archived=False)
-    except Exception:
-        return 0
-    total = 0
-    for meta in boards:
-        slug = meta.get("slug") or DEFAULT_BOARD
-        try:
-            path = kanban_db_path(board=slug).expanduser()
-            resolved = str(path.resolve())
-            if current_path is not None and resolved == current_path:
-                continue
-            if not path.exists():
-                continue
-            other = connect(board=slug)
-            try:
-                total += count_running_tasks(other)
-            finally:
-                try:
-                    other.close()
-                except Exception:
-                    pass
-        except Exception:
-            continue
-    return total
-
-
-def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
-    """Classify current system memory pressure: ok/elevated/critical/unknown.
-
-    Reuses :func:`gateway.memory_status.classify_pressure` so the dispatcher's
-    idea of "critical" matches the memory banner users see on the dashboard
-    and the lifecycle ledger's OOM-suspicion heuristics (NS-608/NS-656).
-    ``unknown`` (non-Linux, read failure) imposes no restriction — the guard
-    must never brick dispatch on hosts where /proc isn't available.
-    """
-    if sample is None:
-        sample = _system_memory_sample()
-    if not sample:
-        return "unknown"
-    try:
-        from gateway.memory_status import classify_pressure
-        return classify_pressure(
-            sample.get("mem_available_kib"), sample.get("mem_total_kib")
-        )
-    except Exception:
-        return "unknown"
-
-
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -9953,13 +10126,6 @@ def _dispatch_once_locked(
     a 60-second tick interval could grow concurrency by N every minute on a
     busy board and accumulate without bound.
 
-    ``max_in_progress`` is a **host-level** concurrency cap (OOF-30): it
-    counts running tasks on every active board — not just this one — plus
-    this tick's spawns. Workers are OS processes sharing one machine's
-    memory, so a per-board interpretation would multiply the cap by the
-    number of active boards. ``max_spawn`` retains its historical per-board
-    semantics.
-
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
@@ -9998,6 +10164,14 @@ def _dispatch_once_locked(
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
+    # Both knobs are total in-flight caps. Collapse them before either lane
+    # dispatches so ready and review workers consume the same budget without
+    # subtracting the already-running count twice.
+    if max_in_progress is not None and (
+        max_spawn is None or max_in_progress < max_spawn
+    ):
+        max_spawn = max_in_progress
+
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
     # rationale; the short version is that a 60-second tick interval with a
@@ -10006,101 +10180,18 @@ def _dispatch_once_locked(
     # they sit in status='running' until the worker calls
     # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
     running_count = 0
-    spawn_budget: Optional[int] = None
-    if max_spawn is not None or max_in_progress is not None:
-        running_count = count_running_tasks(conn)
-
-    # Convert any concurrency caps into a shared additional-spawns budget
-    # for this tick. Both ready and review loops consume from the same
-    # budget so the total number of new workers stays bounded.
     if max_spawn is not None:
-        if running_count >= max_spawn:
-            return result
-        spawn_budget = max_spawn - running_count
-
-    # Honour kanban.max_in_progress across both ready and review queues: if
-    # the board already has enough running tasks, skip this tick entirely.
-    # When there is room left, intersect the remaining in-progress budget
-    # with any explicit max_spawn cap above.
-    #
-    # max_in_progress is a HOST-level cap, not a per-board one (OOF-30):
-    # workers are OS processes sharing one machine's memory, so running
-    # workers on every other board count against the same budget. Without
-    # this, N active boards multiply the cap by N — exactly the fan-out
-    # the memory-derived default exists to prevent.
-    if max_in_progress is not None:
-        total_running = running_count + count_running_tasks_other_boards(board)
-        if total_running >= max_in_progress:
-            return result
-        remaining = max_in_progress - total_running
-        if spawn_budget is None or spawn_budget > remaining:
-            spawn_budget = remaining
-
-    # Memory-pressure guard (OOF-30/OOF-77): even a well-chosen static cap
-    # can't see the host's actual memory state (other tenants, bloated
-    # long-lived workers, dashboard growth). Under observed pressure the
-    # dispatcher stops adding load: critical -> spawn nothing this tick;
-    # elevated -> at most one new worker. Reclaim/promotion above already
-    # ran, so board bookkeeping stays live either way, and deferred tasks
-    # simply wait for a later tick. "unknown" imposes no restriction.
-    pressure = _memory_pressure_level()
-    if pressure == "critical":
-        result.memory_pressure = pressure
-        _log.warning(
-            "kanban dispatch: system memory pressure is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
+        running_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+            ).fetchone()[0]
         )
-        return result
-    if pressure == "elevated":
-        result.memory_pressure = pressure
-        if spawn_budget is None or spawn_budget > 1:
-            _log.warning(
-                "kanban dispatch: system memory pressure is elevated; "
-                "limiting to at most 1 new worker this tick"
-            )
-            spawn_budget = 1
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
-    # Review rows are enumerated up front (not after the ready loop) so the
-    # budget split below can see whether review work exists at all.
-    review_rows = []
-    if review_dispatch_enabled():
-        review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'review' AND claim_lock IS NULL "
-            "ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
-    # Review-lane reservation (OOF-30 review finding): the ready loop runs
-    # first and used to consume the ENTIRE shared budget, so a sustained
-    # ready backlog permanently starved autonomous reviews — completed work
-    # sat in 'review' forever while new work kept spawning. When spawnable
-    # review work exists and the tick has any budget, hold one slot back
-    # from the ready loop so the review lane always gets a spawn
-    # opportunity. The reservation is per-tick and self-releasing: with no
-    # spawnable review work (or no cap at all) the ready loop keeps the
-    # full budget. "Spawnable" mirrors the review loop's own gate
-    # (assigned + real profile) so a review column full of human-pulled
-    # control-plane lanes doesn't permanently tax ready throughput.
-    def _any_spawnable_review() -> bool:
-        if not review_rows:
-            return False
-        try:
-            from hermes_cli.profiles import profile_exists as _rpe
-        except Exception:
-            # Profiles module unavailable (test stubs, exotic envs) —
-            # assume spawnable, matching the review loop's own fallback.
-            return any(row["assignee"] for row in review_rows)
-        return any(
-            row["assignee"] and _rpe(row["assignee"]) for row in review_rows
-        )
-
-    ready_budget = spawn_budget
-    if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review():
-        ready_budget = max(spawn_budget - 1, 0)
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -10139,7 +10230,7 @@ def _dispatch_once_locked(
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
     for row in ready_rows:
-        if ready_budget is not None and spawned >= ready_budget:
+        if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -10336,15 +10427,15 @@ def _dispatch_once_locked(
     # ``sdlc-review`` skill and reviewer workers can now approve, request
     # changes without block-loop accounting, or escalate a genuine blocker.
     # Human-only boards can disable it with ``kanban.review_dispatch``.
-    #
-    # ``review_rows`` was enumerated before the ready loop; when it is
-    # non-empty the ready loop ran against ``ready_budget`` (one slot held
-    # back) so this lane cannot be permanently starved by a sustained
-    # ready backlog. The review loop itself still checks the FULL shared
-    # ``spawn_budget`` — the reservation caps the ready lane, it does not
-    # grant the review lane extra capacity.
+    review_rows = []
+    if review_dispatch_enabled():
+        review_rows = conn.execute(
+            "SELECT id, assignee FROM tasks "
+            "WHERE status = 'review' AND claim_lock IS NULL "
+            "ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
     for row in review_rows:
-        if spawn_budget is not None and spawned >= spawn_budget:
+        if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
@@ -10966,11 +11057,6 @@ def run_daemon(
     on SIGINT / SIGTERM so ``hermes kanban daemon`` is systemd-friendly.
     ``stop_event`` (a :class:`threading.Event`) and ``on_tick`` (a
     callable receiving the :class:`DispatchResult`) are test hooks.
-
-    Each tick resolves ``kanban.max_in_progress`` (explicit config, else
-    the memory-derived default) exactly like the gateway-embedded
-    dispatcher and ``hermes kanban dispatch`` — the standalone daemon must
-    not be the one uncapped entry point (OOF-30).
     """
     import signal
     import threading
@@ -10994,22 +11080,10 @@ def run_daemon(
 
     while not stop_event.is_set():
         try:
-            # Resolve the global concurrency cap the same way the gateway
-            # dispatcher and `hermes kanban dispatch` do (OOF-30): explicit
-            # kanban.max_in_progress wins, otherwise the memory-derived
-            # default applies. The standalone daemon previously passed no
-            # cap at all — the shipped systemd path could still fan out an
-            # entire backlog in one tick even with the derived default in
-            # place everywhere else. Re-resolved every tick (config load is
-            # mtime-cached) so operator edits apply without a restart.
-            max_in_progress = resolve_max_in_progress(
-                configured_max_in_progress()
-            )
             with contextlib.closing(connect()) as conn:
                 res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
-                    max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
                 )
             if on_tick is not None:
@@ -12106,6 +12180,25 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
         (task_id,),
     ).fetchone()
     return Run.from_row(row) if row else None
+
+
+def latest_oracle_receipt(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Return the most recent recorded oracle receipt for ``task_id``.
+
+    Pure read. Returns ``None`` when the task has no ``task_oracle_runs``
+    rows. Newest row wins by ``started_at`` then ``id``. This helper does
+    not enforce anything — it only reports what was recorded.
+    """
+    row = conn.execute(
+        "SELECT * FROM task_oracle_runs WHERE task_id = ? "
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
 
 
 def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

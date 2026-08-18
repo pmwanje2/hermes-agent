@@ -715,7 +715,6 @@ TOOL_CATEGORIES = {
                     # specific binary (e.g. a local build); there is no
                     # version-pin env var.
                 ],
-                "computer_use_backend": "cua",
                 "post_setup": "cua_driver",
             },
         ],
@@ -770,23 +769,6 @@ def _cua_driver_cmd() -> str:
     return os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip() or "cua-driver"
 
 
-def _cua_version_summary(raw: str, *, limit: int = 120) -> str:
-    """Reduce a driver's ``--version`` output to one short status line.
-
-    A binary selected by ``HERMES_CUA_DRIVER_CMD`` is not obliged to answer
-    ``--version`` the way cua-driver does. Pointing the override at, say,
-    ``cmd.exe`` yields a multi-line banner plus a prompt, which used to be
-    interpolated verbatim into ``cua-driver: installed at ... (<version>)``
-    and shattered the one-line summary. Keep the first non-empty line and
-    bound its length.
-    """
-    for line in (raw or "").splitlines():
-        text = line.strip()
-        if text:
-            return text[:limit]
-    return ""
-
-
 def _resolved_cua_driver_cmd() -> Optional[str]:
     """Resolve cua-driver exactly as the runtime and Desktop status do."""
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
@@ -808,49 +790,6 @@ def _cua_driver_env() -> dict:
         return cua_driver_child_env()
     except Exception:
         return dict(os.environ)
-
-
-_CUA_DRIVER_CONTRACT_CACHE: dict = {}
-
-
-def _cua_driver_contract_status(binary: Optional[str] = None) -> dict:
-    """Inspect whether an installed driver supports Hermes' runtime contract."""
-    import time
-
-    from tools.computer_use.cua_backend import cua_driver_runtime_contract_status
-
-    resolved = binary or _resolved_cua_driver_cmd()
-    if not resolved:
-        return cua_driver_runtime_contract_status(None)
-    try:
-        stat = os.stat(resolved)
-        fingerprint = (resolved, stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        return cua_driver_runtime_contract_status(resolved)
-
-    now = time.monotonic()
-    if (
-        _CUA_DRIVER_CONTRACT_CACHE.get("fingerprint") == fingerprint
-        and now - _CUA_DRIVER_CONTRACT_CACHE.get("checked_at", 0.0) < 30.0
-    ):
-        return dict(_CUA_DRIVER_CONTRACT_CACHE["state"])
-
-    state = cua_driver_runtime_contract_status(resolved)
-    _CUA_DRIVER_CONTRACT_CACHE.update(
-        fingerprint=fingerprint,
-        checked_at=now,
-        state=dict(state),
-    )
-    return state
-
-
-def _cua_driver_install_ready() -> bool:
-    """Return whether an existing driver needs no install-time repair."""
-    if not _cua_driver_contract_status().get("ready"):
-        return False
-    if sys.platform == "win32":
-        return _cua_driver_autostart_registered_windows()
-    return True
 
 
 def _pip_install(
@@ -988,9 +927,9 @@ def install_cua_driver(
     The upstream installer always pulls the latest release tag, so re-running
     it is the canonical way to upgrade. We expose two modes:
 
-    * ``upgrade=False`` — keep a compatible Cua Driver 0.20 installation,
-      repair an old or incomplete installation, and install when missing.
-      Used by the toolset enable flow.
+    * ``upgrade=False`` — original post-setup behaviour: skip if already
+      installed, install otherwise. Used by the toolset enable flow where
+      we don't want to surprise the user with a network fetch.
     * ``upgrade=True`` — always re-run the installer (or call ``cua-driver
       update`` if the binary supports it). Used by ``hermes update`` and
       by ``hermes computer-use install --upgrade``.
@@ -1039,20 +978,6 @@ def install_cua_driver(
     driver_cmd = _cua_driver_cmd()
     binary = _resolved_cua_driver_cmd()
 
-    # An explicit override is authoritative even when it is currently broken.
-    # Do not install or replace the standard system driver: that cannot repair
-    # the configured path and would mutate an unrelated installation.
-    override = os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip()
-    if override and not binary:
-        _print_warning(
-            "    HERMES_CUA_DRIVER_CMD does not resolve to an executable: "
-            f"{override}"
-        )
-        _print_info(
-            "    Fix or unset the override before running computer-use install."
-        )
-        return False
-
     # Not installed → fresh install path (only when caller asked for it).
     if not binary and not upgrade:
         if not _cua_install_target_writable():
@@ -1072,20 +997,8 @@ def install_cua_driver(
         # baked in by CD and errors cleanly on missing-arch assets.
         return _run_cua_driver_installer(label="Installing")
 
-    # An installed driver that fails Hermes' runtime contract (version floor,
-    # missing manifest verbs) is repaired regardless of the caller's mode.
-    # Hermes' own minimum requirement IS the confirmation that an upgrade is
-    # needed, so the ``upgrade=True`` path must not defer to the driver's
-    # ``check-update`` verb here — a cached/indeterminate "no update" answer
-    # would otherwise pin users on an unusable driver forever (observed:
-    # 0.19.3 installs hard-failing every computer_use call after the 0.20
-    # contract landed, with `hermes update` declining to refresh).
-    contract = _cua_driver_contract_status(binary) if binary else None
-    repair_existing = bool(binary and contract and not contract.get("ready"))
-
-    # A compatible existing installation needs no download. Finish the small
-    # host-specific setup that the upstream installer normally owns.
-    if binary and not upgrade and not repair_existing:
+    # Already installed and caller didn't ask to upgrade → just confirm.
+    if binary and not upgrade:
         try:
             version = subprocess.run(
                 [binary, "--version"],
@@ -1096,11 +1009,6 @@ def install_cua_driver(
         except Exception:
             _print_success(f"    {driver_cmd} already installed.")
         if is_windows:
-            if not _repair_cua_driver_autostart_windows(binary, verbose=False):
-                _print_warning(
-                    "    cua-driver is compatible, but Windows autostart repair failed."
-                )
-                return False
             _print_info("    cua-driver may spawn a UIAccess worker (cua-driver-uia.exe);")
             _print_info("    Windows/SmartScreen may prompt the first time it runs.")
         elif is_linux:
@@ -1110,21 +1018,6 @@ def install_cua_driver(
             _print_info("      System Settings > Privacy & Security > Accessibility")
             _print_info("      System Settings > Privacy & Security > Screen Recording")
         return True
-
-    if repair_existing:
-        version = contract.get("version") or "unknown version"
-        reason = contract.get("reason") or "required runtime features are missing"
-        _print_warning(
-            f"    Found cua-driver {version}, but Hermes cannot use its current "
-            f"runtime contract: {reason}."
-        )
-        if os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip():
-            _print_info(
-                "    Update the binary selected by HERMES_CUA_DRIVER_CMD, or unset "
-                "the override and run: hermes computer-use install --upgrade"
-            )
-            return False
-        _print_info("    Repairing it with the current upstream installer.")
 
     # upgrade=True path — refresh to the latest upstream release.
     if not _cua_install_target_writable():
@@ -1154,7 +1047,7 @@ def install_cua_driver(
     # `hermes computer-use install --upgrade` falls through and re-runs the
     # installer as before.
     confirmed_version = None
-    if binary and not repair_existing:
+    if binary:
         _state = None
         try:
             from tools.computer_use.cua_backend import cua_driver_update_check
@@ -1205,20 +1098,11 @@ def install_cua_driver(
         before = ""
 
     ok = _run_cua_driver_installer(
-        label="Repairing" if repair_existing else "Refreshing",
+        label="Refreshing",
         verbose=False,
         pin_version=confirmed_version,
         show_progress=show_installer_progress,
     )
-    if ok and repair_existing:
-        repaired = _cua_driver_contract_status()
-        if not repaired.get("ready"):
-            _print_warning(
-                "    cua-driver was reinstalled, but its runtime contract is still "
-                f"unusable: {repaired.get('reason') or 'unknown error'}."
-            )
-            _print_info("    Run: hermes computer-use doctor")
-            return False
     if ok and before:
         try:
             after = subprocess.run(
@@ -1712,10 +1596,9 @@ def _run_cua_driver_installer(
                         pass
                 if result.returncode != 0:
                     logger.debug("cua-driver installer output:\n%s", result.stdout)
-        installed_binary = _resolved_cua_driver_cmd()
-        if result.returncode == 0 and installed_binary:
+        if result.returncode == 0 and shutil.which(driver_cmd):
             if is_windows and not _repair_cua_driver_autostart_windows(
-                installed_binary, verbose=verbose
+                driver_cmd, verbose=verbose
             ):
                 _print_warning(
                     "    cua-driver installed, but auto-start was not registered."
@@ -2667,17 +2550,11 @@ def _get_platform_tools(
     # Honor agent.disabled_toolsets from config.yaml — allows users to
     # globally suppress specific toolsets (e.g. "memory") across all
     # platforms without per-platform toolset configuration.  This runs
-    # last so it overrides everything above.  The value may arrive as a
-    # JSON-array string (e.g. "['memory']") from `hermes config set` or a
-    # JSON-mode editor save; parse it so the list is not silently dead (#86661).
+    # last so it overrides everything above.
     agent_cfg = config.get("agent") or {}
     disabled_toolsets = agent_cfg.get("disabled_toolsets") or []
     if disabled_toolsets:
-        from agent.skill_utils import parse_config_string_list
-
-        disabled_set = {
-            name.strip() for name in parse_config_string_list(disabled_toolsets) if name.strip()
-        }
+        disabled_set = {str(ts) for ts in disabled_toolsets}
         enabled_toolsets -= disabled_set
 
     # #38798: if this platform was explicitly configured but every toolset name
@@ -2791,16 +2668,14 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     agent_cfg = config.get("agent")
     if isinstance(agent_cfg, dict):
         disabled_toolsets = agent_cfg.get("disabled_toolsets")
-        if disabled_toolsets:
-            from agent.skill_utils import parse_config_string_list
-
-            parsed_disabled = parse_config_string_list(disabled_toolsets)
+        if isinstance(disabled_toolsets, list) and disabled_toolsets:
             newly_enabled = enabled_toolset_keys - preserved_entries
             if newly_enabled:
                 remaining = [
-                    ts for ts in parsed_disabled if ts not in newly_enabled
+                    ts for ts in disabled_toolsets
+                    if str(ts) not in newly_enabled
                 ]
-                if remaining != parsed_disabled:
+                if remaining != disabled_toolsets:
                     agent_cfg["disabled_toolsets"] = remaining
 
     save_config(config)
@@ -3399,9 +3274,9 @@ _POST_SETUP_INSTALLED: dict = {
     # Only entries here are gated; other post_setup hooks (kittentts,
     # piper, agent_browser, etc.) keep their existing behaviour. Add an
     # entry when (a) the post_setup is the ONLY install side-effect for
-    # a no-key provider, and (b) an installed-state check is local, bounded,
-    # and doesn't trigger a heavy import.
-    "cua_driver": lambda: _cua_driver_install_ready(),
+    # a no-key provider, and (b) an installed-state check is cheap and
+    # doesn't trigger a heavy import.
+    "cua_driver": lambda: _resolved_cua_driver_cmd() is not None,
 }
 
 
@@ -3511,7 +3386,7 @@ _POST_SETUP_READY: dict = {
     "agent_browser": lambda: _agent_browser_installed(),
     "browserbase": lambda: _cloud_agent_browser_installed(),
     "camofox": lambda: _camofox_installed(),
-    "cua_driver": lambda: _cua_driver_install_ready(),
+    "cua_driver": lambda: _resolved_cua_driver_cmd() is not None,
 }
 
 
@@ -3796,17 +3671,9 @@ def _is_provider_active(
 ) -> bool:
     """Check if a provider entry matches the currently active config."""
     plugin_name = provider.get("image_gen_plugin_name")
-    if plugin_name and not provider.get("managed_nous_feature"):
-        # Managed (Nous-subscription) entries fall through to the
-        # managed_feature branch below, which also checks use_gateway —
-        # otherwise a managed FAL pick and a direct-key FAL pick would both
-        # report active for the same provider name (video already guards).
+    if plugin_name:
         image_cfg = config.get("image_gen", {})
-        if not (isinstance(image_cfg, dict) and image_cfg.get("provider") == plugin_name):
-            return False
-        # A direct-key entry is only active when the managed route is OFF —
-        # mirror of the managed branch's use_gateway check.
-        return not is_truthy_value(image_cfg.get("use_gateway"), default=False)
+        return isinstance(image_cfg, dict) and image_cfg.get("provider") == plugin_name
 
     video_plugin_name = provider.get("video_gen_plugin_name")
     if video_plugin_name and not provider.get("managed_nous_feature"):
@@ -3904,9 +3771,6 @@ def _is_provider_active(
     if provider.get("web_backend"):
         current = cfg_get(config, "web", "backend")
         return current == provider["web_backend"]
-    if provider.get("computer_use_backend"):
-        current = cfg_get(config, "computer_use", "backend")
-        return current == provider["computer_use_backend"]
     if provider.get("imagegen_backend"):
         image_cfg = config.get("image_gen", {})
         if not isinstance(image_cfg, dict):
@@ -4162,22 +4026,14 @@ def _configure_xai_imagine_storage(section_name: str, config: dict) -> None:
         _print_success("  xAI stored public URLs enabled without automatic expiry")
 
 
-def _select_plugin_image_gen_provider(plugin_name: str, config: dict, *, use_gateway: bool = False) -> None:
-    """Persist a plugin-backed image generation provider selection.
-
-    ``use_gateway`` mirrors :func:`_select_plugin_video_gen_provider`: a
-    provider picked through the Nous-managed flow must keep routing through
-    the gateway. Hardcoding ``False`` here silently flipped Nous-managed FAL
-    picks onto the user's personal FAL_KEY — _write_provider_config sets
-    ``image_gen.use_gateway = True`` for a managed pick, and this function
-    runs AFTER it, so the hardcoded value clobbered the managed flag.
-    """
+def _select_plugin_image_gen_provider(plugin_name: str, config: dict) -> None:
+    """Persist a plugin-backed image generation provider selection."""
     img_cfg = config.setdefault("image_gen", {})
     if not isinstance(img_cfg, dict):
         img_cfg = {}
         config["image_gen"] = img_cfg
     img_cfg["provider"] = plugin_name
-    img_cfg["use_gateway"] = use_gateway
+    img_cfg["use_gateway"] = False
     _print_success(f"  image_gen.provider set to: {plugin_name}")
     _configure_imagegen_model_for_plugin(plugin_name, config)
     if plugin_name == "xai":
@@ -4371,11 +4227,6 @@ def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> 
         web_cfg["backend"] = provider["web_backend"]
         web_cfg["use_gateway"] = bool(managed_feature)
 
-    # Set computer_use backend in config if applicable
-    if provider.get("computer_use_backend"):
-        cu_cfg = config.setdefault("computer_use", {})
-        cu_cfg["backend"] = provider["computer_use_backend"]
-
     # For tools without a specific config key (e.g. image_gen), still
     # track use_gateway so the runtime knows the user's intent.
     if managed_feature and managed_feature not in {"web", "tts", "stt", "browser"}:
@@ -4535,7 +4386,7 @@ def _configure_provider(
         # and route model selection to the plugin's own catalog.
         plugin_name = provider.get("image_gen_plugin_name")
         if plugin_name:
-            _select_plugin_image_gen_provider(plugin_name, config, use_gateway=bool(managed_feature))
+            _select_plugin_image_gen_provider(plugin_name, config)
             return
         # Plugin-registered video_gen provider — same flow, different
         # registry.
@@ -4620,7 +4471,7 @@ def _configure_provider(
         _print_success(f"  {provider['name']} configured!")
         plugin_name = provider.get("image_gen_plugin_name")
         if plugin_name:
-            _select_plugin_image_gen_provider(plugin_name, config, use_gateway=bool(managed_feature))
+            _select_plugin_image_gen_provider(plugin_name, config)
             return
         video_plugin = provider.get("video_gen_plugin_name")
         if video_plugin:
@@ -5044,12 +4895,6 @@ def _reconfigure_provider(
         web_cfg["use_gateway"] = bool(managed_feature)
         _print_success(f"  Web backend set to: {provider['web_backend']}")
 
-    # Set computer_use backend in config if applicable
-    if provider.get("computer_use_backend"):
-        cu_cfg = config.setdefault("computer_use", {})
-        cu_cfg["backend"] = provider["computer_use_backend"]
-        _print_success(f"  Computer Use backend set to: {provider['computer_use_backend']}")
-
     if managed_feature and managed_feature not in {"web", "tts", "stt", "browser"}:
         section = config.setdefault(managed_feature, {})
         if not isinstance(section, dict):
@@ -5072,7 +4917,7 @@ def _reconfigure_provider(
             _print_info("  Requests for this tool will be billed to your Nous subscription.")
         plugin_name = provider.get("image_gen_plugin_name")
         if plugin_name:
-            _select_plugin_image_gen_provider(plugin_name, config, use_gateway=bool(managed_feature))
+            _select_plugin_image_gen_provider(plugin_name, config)
             return
         # Plugin-registered video_gen provider — same flow, different registry.
         video_plugin = provider.get("video_gen_plugin_name")
@@ -5087,13 +4932,7 @@ def _reconfigure_provider(
                 img_cfg = config.setdefault("image_gen", {})
                 if isinstance(img_cfg, dict):
                     img_cfg["provider"] = "fal"
-                    # A managed (Nous Subscription) row also carries
-                    # imagegen_backend="fal" — the model picker runs AFTER
-                    # _write_provider_config set use_gateway=True, so an
-                    # unconditional False here silently flipped managed
-                    # picks onto the user's personal FAL_KEY (same class
-                    # as fe63353cb, which fixed the plugin-provider path).
-                    img_cfg["use_gateway"] = bool(managed_feature)
+                    img_cfg["use_gateway"] = False
         # STT providers prompt for model selection on reconfig too.
         if provider.get("stt_provider") and not managed_feature:
             _configure_stt_model(provider["stt_provider"], config)
@@ -5120,7 +4959,7 @@ def _reconfigure_provider(
     # Imagegen backends prompt for model selection on reconfig too.
     plugin_name = provider.get("image_gen_plugin_name")
     if plugin_name:
-        _select_plugin_image_gen_provider(plugin_name, config, use_gateway=bool(managed_feature))
+        _select_plugin_image_gen_provider(plugin_name, config)
         return
 
     # Plugin-registered video_gen provider — same flow, different registry.
@@ -5136,9 +4975,7 @@ def _reconfigure_provider(
             img_cfg = config.setdefault("image_gen", {})
             if isinstance(img_cfg, dict):
                 img_cfg["provider"] = "fal"
-                # Same managed-row guard as the no-env-vars branch above:
-                # never clobber a Nous-managed pick back onto direct keys.
-                img_cfg["use_gateway"] = bool(managed_feature)
+                img_cfg["use_gateway"] = False
 
     # STT providers prompt for model selection on reconfig too.
     if provider.get("stt_provider") and not managed_feature:

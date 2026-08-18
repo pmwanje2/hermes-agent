@@ -5,7 +5,18 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AudioLines, Ear, EarOff, iconSize, Layers3, Loader2, Square, Volume2, VolumeX } from '@/lib/icons'
+import {
+  AudioLines,
+  Ear,
+  EarOff,
+  iconSize,
+  Layers3,
+  Loader2,
+  Square,
+  SteeringWheel,
+  Volume2,
+  VolumeX
+} from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 
@@ -76,10 +87,7 @@ export function ComposerControls({
   }
 
   const showVoicePrimary = !busy && !hasComposerPayload
-  // Steer is just send: a payload keeps the Send affordance mid-turn. Stop
-  // only when the composer is empty and a turn is running.
-  const showStop = busy && !hasComposerPayload
-  const showQueueButton = busyAction !== 'stop' && hasComposerPayload
+  const busyLabel = busyAction === 'queue' ? c.queueMessage : busyAction === 'steer' ? c.steer : c.stop
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-(--composer-control-gap)">
@@ -87,7 +95,7 @@ export function ComposerControls({
       <DictationButton disabled={disabled} onToggle={onDictate} state={state.voice} status={voiceStatus} />
       <AutoSpeakButton active={autoSpeak} disabled={disabled} onToggle={onToggleAutoSpeak} />
       <WakeWordButton disabled={disabled} />
-      {showQueueButton ? (
+      {busyAction === 'steer' ? (
         <Tip label={<TipKeybindLabel actionId="composer.queue" text={c.queueMessage} />}>
           <Button
             aria-label={c.queueMessage}
@@ -121,21 +129,36 @@ export function ComposerControls({
       ) : (
         <Tip
           label={
-            showStop ? (
-              <TipKeybindLabel actionId="composer.send" text={c.stop} />
+            busy ? (
+              <TipKeybindLabel
+                actionId={
+                  busyAction === 'steer'
+                    ? 'composer.steer'
+                    : busyAction === 'queue'
+                      ? 'composer.queue'
+                      : 'composer.send'
+                }
+                text={busyLabel}
+              />
             ) : (
               <TipKeybindLabel actionId="composer.send" text={c.send} />
             )
           }
         >
           <Button
-            aria-label={showStop ? c.stop : c.send}
+            aria-label={busy ? busyLabel : c.send}
             className={PRIMARY_ICON_BTN}
             disabled={disabled || !canSubmit}
             type="submit"
           >
-            {showStop ? (
-              <span className="block size-2.5 rounded-[0.1875rem] bg-current" />
+            {busy ? (
+              busyAction === 'queue' ? (
+                <Layers3 className={iconSize.sm} />
+              ) : busyAction === 'steer' ? (
+                <SteeringWheel className={iconSize.sm} />
+              ) : (
+                <span className="block size-2.5 rounded-[0.1875rem] bg-current" />
+              )
             ) : (
               <Codicon name="arrow-up" size="0.875rem" />
             )}

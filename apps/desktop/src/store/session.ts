@@ -5,12 +5,9 @@ import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
 import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
 import type { ChatMessage } from '@/lib/chat-messages'
-import { activeConnectionScopeSuffix, rescopeConnectionScopedStores } from '@/lib/connection-scoped'
 import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
 import { syncCronModelImpactConnection } from '@/store/cron-model-impact-scope'
 import type { SessionInfo, UsageStats } from '@/types/hermes'
-
-import { clearUnreadOnOpen } from './session-unread-remote'
 
 type Updater<T> = T | ((current: T) => T)
 export type ComposerModelSource = '' | 'default' | 'manual'
@@ -43,12 +40,7 @@ const LAST_ROUTE_KEY = 'hermes.desktop.lastRoute'
 function profileNavigationKey(base: string, profile: string): string {
   const key = profile.trim() || 'default'
 
-  // Also carries the CONNECTION scope: the same profile name on a different
-  // gateway is a different backend with its own sessions, and windows on
-  // different gateways share this localStorage area — restoring one
-  // gateway's remembered session under another navigates to a session that
-  // backend has never seen (#77318).
-  return `${base}.profile.${encodeURIComponent(key)}${activeConnectionScopeSuffix()}`
+  return `${base}.profile.${encodeURIComponent(key)}`
 }
 
 // Discard legacy global keys once per tick. A module-level flag avoids
@@ -666,11 +658,6 @@ export const $sessionPickerOpen = atom(false)
 
 export const setConnection = (next: Updater<HermesConnection | null>) => {
   updateAtom($connection, next)
-  // Repoint connection-scoped persistence (pins, manual session order,
-  // remembered navigation) at the new backend's storage scope before any
-  // consumer reconciles against it. A null descriptor (reconnect blip)
-  // keeps the current scope.
-  rescopeConnectionScopedStores($connection.get())
   syncCronModelImpactConnection($connection.get())
 }
 
@@ -690,82 +677,24 @@ export const setActiveSessionId = (next: Updater<string | null>) => updateAtom($
 export const setActiveSessionStoredIdRotation = (next: Updater<ActiveSessionStoredIdRotation | null>) =>
   updateAtom($activeSessionStoredIdRotation, next)
 
-// A background session finished and the user hasn't opened it since. This atom
-// is the transient PAINT layer (what the dots subscribe to); durability lives
-// in session-unread.ts, which persists explicit finish markers + per-session
-// "seen message_count" watermarks and rebuilds this atom from them on every
-// list refresh — so the green dot survives an app restart, and a session that
-// finished while the app was CLOSED still comes up unread. The explicit
-// Mark-as-unread toggle rides the BACKEND watermark instead
-// (SessionDB.set_session_read, session-unread-remote.ts). Written by
-// session-states.ts (live busy→idle edge), cleared here on session open.
+// Transient: a background session finished and the user hasn't opened it since.
+// Written by session-states.ts (handleTransition), cleared here on session open.
 export const $unreadFinishedSessionIds = atom<string[]>([])
 
-/** Sidebar "mark all as read" — clears every finished-unread dot. Purely
- *  renderer-local, like the atom itself. */
-export function markAllSessionsRead() {
-  if ($unreadFinishedSessionIds.get().length > 0) {
+export const markAllSessionsRead = () => {
+  if ($unreadFinishedSessionIds.get().length) {
     $unreadFinishedSessionIds.set([])
-  }
-}
-
-// Last time the user actually viewed a session. A finished turn should only
-// re-arm the unread marker if it settles AFTER this baseline; otherwise an
-// already-viewed completion keeps re-lighting the row.
-export const $lastReadAtBySessionId = atom<Record<string, number>>({})
-
-/** A new turn started for this session: the read baseline only guarded the
- *  PREVIOUS completion's re-asserts, so drop it — the new turn's finish must
- *  re-light even when it lands in the same millisecond as the last read. */
-export const clearReadBaseline = (storedSessionId: string) => {
-  const map = $lastReadAtBySessionId.get()
-
-  if (storedSessionId in map) {
-    const { [storedSessionId]: _dropped, ...rest } = map
-    $lastReadAtBySessionId.set(rest)
   }
 }
 
 export const setSelectedStoredSessionId = (next: Updater<string | null>) => {
   updateAtom($selectedStoredSessionId, next)
   // Opening a session clears its unread state — the user is now looking at it.
-  // Clear the whole conversation family (branch children + compression lineage
-  // root), not just the exact row: the sidebar lights the dot for every alias
-  // of a lineage, so reading any row must clear all of them.
   const id = $selectedStoredSessionId.get()
 
-  if (id) {
-    markSessionRead(id)
+  if (id && $unreadFinishedSessionIds.get().includes(id)) {
+    $unreadFinishedSessionIds.set($unreadFinishedSessionIds.get().filter(x => x !== id))
   }
-
-  // ...and the persisted watermark flag, when the row carried one.
-  if (id) {
-    void clearUnreadOnOpen(id)
-  }
-}
-
-/** Record that the user has seen a session (and its conversation family) at
- *  this moment. Clears the unread set for the family and stores a last-read
- *  baseline so a later completion that settles BEFORE this view is not
- *  re-lit. Must be callable before any focus short-circuit (openSession top)
- *  so re-clicking an already-visible session still clears its dot. */
-export const markSessionRead = (storedSessionId: string | null | undefined) => {
-  if (!storedSessionId) {
-    return
-  }
-
-  const sessions = $sessions.get()
-  const familyIds = new Set<string>(lineageAliases(storedSessionId, sessions))
-
-  const lastReadAt = Date.now()
-  const nextReadMap = { ...$lastReadAtBySessionId.get() }
-
-  for (const id of familyIds) {
-    nextReadMap[id] = lastReadAt
-  }
-
-  $lastReadAtBySessionId.set(nextReadMap)
-  $unreadFinishedSessionIds.set($unreadFinishedSessionIds.get().filter(id => !familyIds.has(id)))
 }
 
 export const setMessages = (next: Updater<ChatMessage[]>) => updateAtom($messages, next)

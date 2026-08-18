@@ -598,13 +598,6 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     // hazard on the main composer).
     try {
       aui.composer().send()
-
-      // Clear latch after cooldown to allow re-submission. This prevents rapid
-      // double-Enter but doesn't require tracking when onEdit settles (which may
-      // be synchronous or async, and whose promise we don't have access to).
-      window.setTimeout(() => {
-        setSubmitting(false)
-      }, 200)
     } catch {
       setSubmitting(false)
     }
@@ -664,7 +657,6 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       composingRef.current = false
     }
 
-    // IME composition: Enter confirms composed text, not a message submission.
     if (composingRef.current || event.nativeEvent.isComposing) {
       return
     }
@@ -781,9 +773,6 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       <StickyHumanMessageContainer>
         <div
           className="composer-human-message-container human-execution-message-top relative flex w-full items-start rounded-md bg-(--ui-chat-surface-background)"
-          // A raised box over the transcript field: under window glass it keeps
-          // a near-opaque fill instead of thinning with the field behind it.
-          data-glass-raised=""
           onBlur={handleEditBlur}
           onDragEnter={handleDragEnter}
           onDragLeave={handleDragLeave}
@@ -816,7 +805,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
               autoCapitalize="off"
               autoCorrect="off"
               className={cn(
-                'ui-prompt-input-editor__input max-h-48 w-full resize-none overflow-y-auto bg-transparent p-0 pr-7 text-[length:var(--conversation-text-font-size)] text-foreground/95 outline-none',
+                'ui-prompt-input-editor__input max-h-48 w-full resize-none bg-transparent p-0 pr-7 text-[length:var(--conversation-text-font-size)] text-foreground/95 outline-none',
                 '**:data-ref-text:cursor-default',
                 expanded ? 'min-h-16' : 'min-h-[1.25rem]'
               )}

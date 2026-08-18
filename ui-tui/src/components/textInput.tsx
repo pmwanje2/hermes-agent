@@ -184,27 +184,6 @@ export function valueForReturnSubmit(
   return applyPrintableInsert(value, cursor, beforeReturn, range) ?? { cursor, value }
 }
 
-/**
- * Transactional cut. Writes `text` to the clipboard and only invokes
- * `removeSelection` once the write actually succeeds. On failure (e.g. a
- * headless/SSH box with no clipboard backend) the selection is left untouched
- * so the text is never destroyed without a copy to paste back. Returns whether
- * the clipboard write succeeded.
- */
-export async function cutSelection(
-  text: string,
-  write: (text: string) => Promise<boolean>,
-  removeSelection: () => void
-): Promise<boolean> {
-  const ok = await write(text)
-
-  if (ok) {
-    removeSelection()
-  }
-
-  return ok
-}
-
 export function shouldPreserveCtrlJNewline(env: MinimalEnv = process.env): boolean {
   if (env.WT_SESSION) {
     return true
@@ -227,32 +206,6 @@ export function shouldPreserveCtrlJNewline(env: MinimalEnv = process.env): boole
   }
 
   return (env.WSL_DISTRO_NAME ?? '').toLowerCase().includes('microsoft')
-}
-
-type ReturnDecisionKey = {
-  ctrl: boolean
-  meta: boolean
-  return?: boolean
-  shift?: boolean
-  super?: boolean
-}
-
-/**
- * Decide whether a Return keypress should insert a newline instead of
- * submitting. An explicit modified Enter (Shift/Ctrl, or the platform action
- * modifier) always inserts a newline. Beyond that, terminals that can't send a
- * distinct Shift+Enter collapse a modified Enter / Ctrl+J down to a bare LF —
- * shouldPreserveCtrlJNewline() detects that via env (SSH, Windows Terminal,
- * Ghostty, WSL), and macOS terminals (Terminal.app, iTerm2 defaults) do it too
- * but aren't env-detectable, so a bare LF is treated as a newline there as well.
- * Plain Enter (CR) stays submit everywhere.
- */
-export function shouldInsertNewlineOnReturn(key: ReturnDecisionKey, sequence = ''): boolean {
-  if (key.shift || key.ctrl || (isMac ? isActionMod(key) : key.meta)) {
-    return true
-  }
-
-  return sequence === '\n' && (isMac || shouldPreserveCtrlJNewline())
 }
 
 function prevPos(s: string, p: number) {
@@ -308,16 +261,6 @@ function wordRight(s: string, p: number) {
   }
 
   return i
-}
-
-/**
- * Delete the word to the RIGHT of the cursor (readline meta+d / kill-word).
- * The cursor stays put; the text from the cursor to the next word boundary is
- * removed. Callers guard against `cursor >= value.length` themselves; when the
- * cursor is already at the end this is a no-op.
- */
-export function deleteWordForward(value: string, cursor: number): TextInsertResult {
-  return { cursor, value: value.slice(0, cursor) + value.slice(wordRight(value, cursor)) }
 }
 
 /**
@@ -867,39 +810,6 @@ export function TextInput({
         setCur(vRef.current.length)
         curRef.current = vRef.current.length
       },
-      copy: () => {
-        const range = selRange()
-
-        if (range) {
-          void writeClipboardText(vRef.current.slice(range.start, range.end))
-        }
-      },
-      cut: () => {
-        const range = selRange()
-
-        if (!range) {
-          return
-        }
-
-        // Transactional cut: only remove the selection once the clipboard
-        // write actually succeeds. A fire-and-forget write on a headless/SSH
-        // box (no clipboard backend) would otherwise destroy the text with no
-        // copy to paste back. On failure the selection is left intact.
-        const text = vRef.current.slice(range.start, range.end)
-
-        void cutSelection(text, writeClipboardText, () => {
-          // Re-read the selection: the awaited clipboard write opens a window
-          // in which the user could have moved/changed the selection. Only
-          // remove when it still matches what we copied.
-          const current = selRange()
-
-          if (!current || current.start !== range.start || current.end !== range.end) {
-            return
-          }
-
-          commit(vRef.current.slice(0, current.start) + vRef.current.slice(current.end), current.start)
-        })
-      },
       end: selected?.end ?? curRef.current,
       start: selected?.start ?? curRef.current,
       value: vRef.current
@@ -1034,11 +944,9 @@ export function TextInput({
         // guard. Use a short real-time window that spans a recompose burst;
         // normal typing re-enables fast-echo via the append path below.
         inkRepaintedRef.current = true
-
         if (inkRepaintResetTimer.current) {
           clearTimeout(inkRepaintResetTimer.current)
         }
-
         inkRepaintResetTimer.current = setTimeout(() => {
           inkRepaintResetTimer.current = null
           inkRepaintedRef.current = false
@@ -1314,9 +1222,9 @@ export function TextInput({
         const range = selRange()
         const pending = valueForReturnSubmit(vRef.current, curRef.current, inp, range)
         const sequence = (event.keypress as { sequence?: string }).sequence
-        const insertNewline = shouldInsertNewlineOnReturn(k, sequence ?? '')
+        const preserveBareLineFeed = shouldPreserveCtrlJNewline() && sequence === '\n'
 
-        if (insertNewline) {
+        if (k.shift || k.ctrl || preserveBareLineFeed || (isMac ? isActionMod(k) : k.meta)) {
           commit(ins(pending.value, pending.cursor, '\n'), pending.cursor + 1)
         } else {
           cbSubmit.current?.(pending.value)
@@ -1394,21 +1302,6 @@ export function TextInput({
       } else if (wordMod && inp === 'f') {
         clearSel()
         c = wordRight(v, c)
-      } else if (wordMod && inp === 'd') {
-        // meta+d (readline kill-word). The web dashboard maps Ctrl+Delete to
-        // ESC d, which hermes-ink decodes as meta+'d'; without this branch it
-        // fell through to the printable path and typed a literal "d".
-        if (range) {
-          v = v.slice(0, range.start) + v.slice(range.end)
-          c = range.start
-        } else if (c < v.length) {
-          clearSel()
-          const next = deleteWordForward(v, c)
-          v = next.value
-          c = next.cursor
-        } else {
-          return
-        }
       } else if (range && (k.backspace || delFwd)) {
         v = v.slice(0, range.start) + v.slice(range.end)
         c = range.start
@@ -1445,7 +1338,8 @@ export function TextInput({
           // Cmd+ForwardDelete — kill to end of line, matching Ctrl+K.
           ;({ cursor: c, value: v } = killToLineEnd(v, c))
         } else if (wordMod) {
-          v = deleteWordForward(v, c).value
+          const t = wordRight(v, c)
+          v = v.slice(0, c) + v.slice(t)
         } else {
           v = v.slice(0, c) + v.slice(nextPos(v, c))
         }
@@ -1552,12 +1446,10 @@ export function TextInput({
               // terminal baseline is synced again — clear any pending Ink-repaint
               // fast-echo suppression so normal backspace fast-echo resumes.
               inkRepaintedRef.current = false
-
               if (inkRepaintResetTimer.current) {
                 clearTimeout(inkRepaintResetTimer.current)
                 inkRepaintResetTimer.current = null
               }
-
               // ASCII-printable text advances the physical cursor by exactly
               // text.length cells (canFastAppendShape rejects non-ASCII,
               // wide chars, newlines). Notify Ink so the cached displayCursor

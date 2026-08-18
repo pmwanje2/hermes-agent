@@ -81,6 +81,11 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
+        "oracle_kind": t.oracle_kind,
+        "oracle_cmd": t.oracle_cmd,
+        "oracle_timeout_s": t.oracle_timeout_s,
+        "oracle_image": t.oracle_image,
+        "oracle_waiver_reason": t.oracle_waiver_reason,
     }
 
 
@@ -399,6 +404,22 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
+    p_create.add_argument("--oracle-kind", default=None,
+                          choices=sorted(kb.ORACLE_KINDS),
+                          help="Optional Card Acceptance Oracle kind "
+                               "(jest | tsc | shell | none). Recorded at "
+                               "completion; does not refuse Phase-1 completes.")
+    p_create.add_argument("--oracle-cmd", default=None,
+                          help="Oracle command / test path (required for "
+                               "jest/tsc/shell).")
+    p_create.add_argument("--oracle-timeout", default=None, dest="oracle_timeout_s",
+                          type=int,
+                          help="Oracle timeout in seconds (default 900).")
+    p_create.add_argument("--oracle-image", default=None,
+                          help="Container image for the oracle runner.")
+    p_create.add_argument("--oracle-waiver-reason", default=None,
+                          help="Required when --oracle-kind none: why this "
+                               "card has no executable oracle.")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1586,6 +1607,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            board=kb.get_current_board(),
+            oracle_kind=getattr(args, "oracle_kind", None),
+            oracle_cmd=getattr(args, "oracle_cmd", None),
+            oracle_timeout_s=getattr(args, "oracle_timeout_s", None),
+            oracle_image=getattr(args, "oracle_image", None),
+            oracle_waiver_reason=getattr(args, "oracle_waiver_reason", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
@@ -1706,6 +1733,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
         # looking like a no-op when the worker actually did real work.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        latest_oracle = kb.latest_oracle_receipt(conn, args.task_id)
         if not getattr(args, "json", False):
             graph = kb.task_graph_context(conn, task.id)
 
@@ -1713,6 +1741,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         payload = {
             "task": _task_to_dict(task),
             "latest_summary": latest_summary,
+            "latest_oracle_receipt": latest_oracle,
             "parents": parents,
             "children": children,
             "comments": [
@@ -1828,6 +1857,17 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print()
         print("Latest summary:")
         print(latest_summary)
+    if latest_oracle:
+        print()
+        print("Oracle receipt (advisory / recorded):")
+        print(f"  kind:     {latest_oracle.get('kind') or '-'}")
+        print(f"  cmd:      {latest_oracle.get('cmd') or '-'}")
+        rc = latest_oracle.get("rc")
+        print(f"  rc:       {rc if rc is not None else '(none / waiver)'}")
+        if latest_oracle.get("log_path"):
+            print(f"  log:      {latest_oracle['log_path']}")
+        if latest_oracle.get("head_sha"):
+            print(f"  head_sha: {latest_oracle['head_sha']}")
     if comments:
         print()
         print(f"Comments ({len(comments)}):")
@@ -2643,10 +2683,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             _kanban_cfg.get("max_in_progress_per_profile")
         )
         max_in_progress = _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
-        # Memory-derived default when unset (OOF-30/OOF-77) — same
-        # fallback the gateway-embedded dispatcher applies, so behaviour
-        # matches regardless of which path runs the tick.
-        max_in_progress = kb.resolve_max_in_progress(max_in_progress)
         # CLI --max overrides config kanban.max_spawn when both are present;
         # CLI is the more explicit signal so it wins.
         cli_max = getattr(args, "max", None)
@@ -3221,20 +3257,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     removed_ws = 0
     with kb.connect_closing() as conn:
         rows = conn.execute(
-            "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
-            "WHERE status = 'archived'"
+            "SELECT id, workspace_kind, workspace_path FROM tasks WHERE status = 'archived'"
         ).fetchall()
     for row in rows:
-        if row["workspace_kind"] == "worktree":
-            # Backstop for worktrees that escaped the completion/archive hook
-            # (e.g. tasks archived before that hook existed). Same safety
-            # predicate: only clean, fully-pushed worktrees are removed.
-            wt_path = row["workspace_path"]
-            if wt_path and Path(wt_path).is_dir():
-                kb._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
-                if not Path(wt_path).is_dir():
-                    removed_ws += 1
-            continue
         if row["workspace_kind"] != "scratch":
             continue
         path = Path(row["workspace_path"] or (scratch_root / row["id"]))

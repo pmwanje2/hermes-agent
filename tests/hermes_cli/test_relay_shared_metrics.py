@@ -522,7 +522,6 @@ def test_client_resource_classification_is_bounded():
     assert client_architecture("armv7l") == "arm"
     assert client_install_method("Homebrew") == "homebrew"
     assert client_install_method("nix") == "nixos"
-    assert client_install_method("apt") == "apt"
 
     assert client_resource(
         "",

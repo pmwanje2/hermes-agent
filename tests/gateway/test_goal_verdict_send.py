@@ -96,18 +96,6 @@ def _make_runner_with_adapter(session_id: str = None):
     return runner, adapter, session_entry, src
 
 
-async def _drain_until(condition, timeout=5.0):
-    """Yield to the event loop until ``condition()`` is truthy (bounded).
-
-    The goal-continuation path finishes its sends/enqueues on spawned tasks;
-    a fixed 0.05s sleep raced them on loaded CI runners (#88975). Returns as
-    soon as the condition holds — the asserts after the call stay exact.
-    """
-    deadline = asyncio.get_event_loop().time() + timeout
-    while not condition() and asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(0.01)
-
-
 @pytest.mark.asyncio
 async def test_goal_verdict_continue_enqueues_continuation(hermes_home):
     """When the judge says continue, both the 'continuing' status and the
@@ -127,7 +115,7 @@ async def test_goal_verdict_continue_enqueues_continuation(hermes_home):
             source=src,
             final_response="here's a partial edit",
         )
-        await _drain_until(lambda: adapter.sends and adapter._pending_messages)
+        await asyncio.sleep(0.05)
 
     # Status line sent back
     assert len(adapter.sends) == 1
@@ -155,7 +143,7 @@ async def test_goal_verdict_budget_exhausted_sends_pause(hermes_home):
             source=src,
             final_response="still partial",
         )
-        await _drain_until(lambda: adapter.sends)
+        await asyncio.sleep(0.05)
 
     assert len(adapter.sends) == 1
     content = adapter.sends[0]["content"]

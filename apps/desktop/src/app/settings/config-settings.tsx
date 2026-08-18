@@ -18,32 +18,21 @@ import {
   refreshDataUrlReadMaxMb,
   setDataUrlReadMaxMb
 } from '@/store/data-url-read-max'
-import { $disableF12, setDisableF12 } from '@/store/disable-f12'
 import { $keepAwake, setKeepAwake } from '@/store/keep-awake'
 import { notify, notifyError } from '@/store/notifications'
-import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
-import { $settingsScopeOverride } from '@/store/settings-scope'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
-import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
+import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 import { PanelEmpty } from '../overlays/panel'
 
 import { ConfigField } from './config-field'
-import {
-  clearsEnabledToolsets,
-  enumOptionsFor,
-  getNested,
-  isExternalMemoryProvider,
-  sectionFieldEntries,
-  setNested
-} from './helpers'
+import { clearsEnabledToolsets, enumOptionsFor, getNested, isExternalMemoryProvider, sectionFieldEntries, setNested } from './helpers'
 import { MemoryConnect } from './memory/connect'
 import { ProviderConfigPanel } from './memory/provider-config-panel'
 import { ModelSettings, ModelSettingsSkeleton } from './model-settings'
 import { EmptyState, ListRow, SettingsContent, SettingsSkeleton, ToggleRow } from './primitives'
-import { SettingsProfileScope } from './profile-scope'
 import { QuickEntrySettings } from './quick-entry-settings'
 
 // On the Voice page, only surface the sub-fields of the *selected* TTS/STT
@@ -71,62 +60,28 @@ export function ConfigSettings({
   onConfigSaved,
   onMainModelChanged,
   importInputRef
-}: ConfigSettingsProps) {
-  // Shared "Applies to" scope (null → the app's active profile). Remount the
-  // inner page per scope so every draft/seed/autosave ref resets wholesale
-  // when the target profile changes — the same guarantee useOnProfileSwitch
-  // provides for app-wide switches, without hand-clearing each piece.
-  const scopeProfile = useStore($settingsScopeOverride)
-
-  return (
-    <ConfigSettingsInner
-      activeSectionId={activeSectionId}
-      importInputRef={importInputRef}
-      key={scopeProfile ?? '__active__'}
-      onConfigSaved={onConfigSaved}
-      onMainModelChanged={onMainModelChanged}
-      scopeProfile={scopeProfile}
-    />
-  )
-}
-
-interface ConfigSettingsProps {
+}: {
   activeSectionId: string
   onConfigSaved?: () => void
   onMainModelChanged?: (provider: string, model: string) => void
   importInputRef: React.RefObject<HTMLInputElement | null>
-}
-
-function ConfigSettingsInner({
-  activeSectionId,
-  onConfigSaved,
-  onMainModelChanged,
-  importInputRef,
-  scopeProfile
-}: ConfigSettingsProps & { scopeProfile: null | string }) {
+}) {
   const { t } = useI18n()
   const c = t.settings.config
   const keepAwake = useStore($keepAwake)
-  const disableF12 = useStore($disableF12)
   // The editable draft is local (debounced autosave watches it), but it's seeded
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
-  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(scopeProfile)
-  // Writes land on the same cache key the query above reads (base key when
-  // following the active profile, suffixed when a scope override is set).
-  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(scopeProfile), [scopeProfile])
+  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord()
 
   const {
     data: schemaResponse,
     isError: schemaFailed,
     refetch: refetchSchema
   } = useQuery({
-    // Base key when following the active profile (matches every pre-existing
-    // consumer); suffixed only for an explicit scope override.
-    queryKey:
-      scopeProfile == null ? ['hermes-config-schema'] : ['hermes-config-schema', normalizeProfileKey(scopeProfile)],
-    queryFn: () => getHermesConfigSchema(scopeProfile ?? undefined),
+    queryKey: ['hermes-config-schema'],
+    queryFn: getHermesConfigSchema,
     staleTime: 5 * 60 * 1000
   })
 
@@ -165,7 +120,7 @@ function ConfigSettingsInner({
   useEffect(() => {
     let cancelled = false
 
-    getElevenLabsVoices(scopeProfile ?? undefined)
+    getElevenLabsVoices()
       .then(result => {
         if (cancelled || !result.available) {
           return
@@ -182,8 +137,7 @@ function ConfigSettingsInner({
       })
 
     return () => void (cancelled = true)
-    // scopeProfile is constant per mount (the inner component is keyed on it).
-  }, [scopeProfile])
+  }, [])
 
   // eslint-disable-next-line no-restricted-syntax -- autosave bookkeeping refs, not an atom mirror
   useEffect(() => {
@@ -196,7 +150,7 @@ function ConfigSettingsInner({
     const t = window.setTimeout(() => {
       void (async () => {
         try {
-          const result = await saveHermesConfig(config, scopeProfile ?? undefined)
+          const result = await saveHermesConfig(config)
 
           if (!result.ok) {
             throw new Error(c.autosaveFailed)
@@ -204,18 +158,14 @@ function ConfigSettingsInner({
 
           // Mirror the saved record into the shared cache so MCP/model surfaces
           // reflect the edit without their own refetch.
-          writeConfigCache(config)
+          setHermesConfigCache(config)
 
           if (saveVersionRef.current === v) {
-            // The repo-discovery scan reads the ACTIVE profile's workspace
-            // policy; skip it when this page is editing another profile.
-            if (scopeProfile == null) {
-              const discoverySignature = repoDiscoveryPolicySignature(repoDiscoveryPolicyFromConfig(config))
+            const discoverySignature = repoDiscoveryPolicySignature(repoDiscoveryPolicyFromConfig(config))
 
-              if (savedDiscoverySignatureRef.current !== discoverySignature) {
-                savedDiscoverySignatureRef.current = discoverySignature
-                await scanAndRecordRepos(true)
-              }
+            if (savedDiscoverySignatureRef.current !== discoverySignature) {
+              savedDiscoverySignatureRef.current = discoverySignature
+              await scanAndRecordRepos(true)
             }
 
             onConfigSaved?.()
@@ -342,7 +292,6 @@ function ConfigSettingsInner({
     if (activeSectionId === 'model') {
       return (
         <SettingsContent>
-          <SettingsProfileScope className="mb-5" />
           <div className="mb-6">
             <ModelSettingsSkeleton />
           </div>
@@ -357,12 +306,9 @@ function ConfigSettingsInner({
 
   return (
     <SettingsContent>
-      {/* Which profile's config.yaml this page edits — shared across every
-          config-backed settings page (and hidden for single-profile users). */}
-      <SettingsProfileScope className="mb-5" />
       {activeSectionId === 'model' && (
         <div className="mb-6">
-          <ModelSettings onMainModelChanged={onMainModelChanged} scopeProfile={scopeProfile} />
+          <ModelSettings onMainModelChanged={onMainModelChanged} />
         </div>
       )}
       {/* Device-local desktop prefs (not config.yaml) — they live here since
@@ -375,12 +321,6 @@ function ConfigSettingsInner({
             description={c.keepAwakeDesc}
             label={c.keepAwakeTitle}
             onChange={setKeepAwake}
-          />
-          <ToggleRow
-            checked={disableF12}
-            description={c.disableF12Desc}
-            label={c.disableF12Title}
-            onChange={setDisableF12}
           />
           <QuickEntrySettings />
         </>
@@ -398,7 +338,7 @@ function ConfigSettingsInner({
               <ConfigField
                 descriptionExtra={
                   key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
-                    <MemoryConnect profile={scopeProfile} provider={String(getNested(config, key))} />
+                    <MemoryConnect provider={String(getNested(config, key))} />
                   ) : undefined
                 }
                 enumOptions={
@@ -413,11 +353,7 @@ function ConfigSettingsInner({
                 value={getNested(config, key)}
               />
               {key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
-                <ProviderConfigPanel
-                  key={String(getNested(config, key))}
-                  profile={scopeProfile}
-                  provider={String(getNested(config, key))}
-                />
+                <ProviderConfigPanel key={String(getNested(config, key))} provider={String(getNested(config, key))} />
               ) : null}
             </div>
           ))}

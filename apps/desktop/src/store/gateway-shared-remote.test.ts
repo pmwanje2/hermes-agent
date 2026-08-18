@@ -19,7 +19,6 @@ const gatewayMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/hermes', () => ({
-  setApiRequestConnection: vi.fn(),
   HermesGateway: class {
     connectionState = 'closed'
     connect = async (wsUrl: string): Promise<void> => {
@@ -132,12 +131,11 @@ describe('ensureGatewayForProfile under a shared global remote', () => {
 
     await ensureGatewayForProfile('worker')
 
-    expect(gatewayMocks.setConnection).toHaveBeenCalledOnce()
-    expect(gatewayMocks.setConnection).toHaveBeenLastCalledWith(connection)
+    expect(gatewayMocks.setConnection).not.toHaveBeenCalled()
 
     await ensureActiveGatewayOpen()
 
-    expect(gatewayMocks.setConnection).toHaveBeenCalledTimes(2)
-    expect(gatewayMocks.setConnection).toHaveBeenLastCalledWith(connection)
+    expect(gatewayMocks.setConnection).toHaveBeenCalledOnce()
+    expect(gatewayMocks.setConnection).toHaveBeenCalledWith(connection)
   })
 })

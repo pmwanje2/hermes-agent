@@ -16,11 +16,7 @@ vi.mock('@/components/pane-shell/tree/store', () => ({
   closeTreeTabsToRight: vi.fn(),
   treeTabCloseTargets: vi.fn(() => null)
 }))
-vi.mock('@/hermes', () => ({
-  renameSession: vi.fn(),
-  setApiRequestProfile: vi.fn(),
-  setSessionUnreadRemote: vi.fn(() => Promise.resolve({ ok: true }))
-}))
+vi.mock('@/hermes', () => ({ renameSession: vi.fn() }))
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: {
@@ -54,7 +50,6 @@ vi.mock('@/i18n', () => ({
           deleted: 'Session deleted',
           export: 'Export',
           hideTabBar: 'Hide tab bar',
-          markRead: 'Mark as read',
           pin: 'Pin',
           rename: 'Rename',
           renameDesc: 'Leave empty to clear.',
@@ -84,12 +79,8 @@ vi.mock('@/store/projects', () => ({
 vi.mock('@/store/session', () => ({
   $activeSessionId: atom<null | string>(null),
   $connection: atom<null | { mode: string }>(null),
-  $cronSessions: atom<unknown[]>([]),
-  $messagingSessions: atom<unknown[]>([]),
   $selectedStoredSessionId: atom<null | string>(null),
   $sessions: atom<unknown[]>([]),
-  $unreadFinishedSessionIds: atom<string[]>([]),
-  markSessionRead: vi.fn(),
   sessionMatchesStoredId: vi.fn(() => false),
   sessionPinId: vi.fn((s: { id: string }) => s.id),
   setSessions: vi.fn()
@@ -105,7 +96,6 @@ vi.mock('@/store/session-states', () => ({
 vi.mock('@/store/windows', () => ({
   canOpenSessionInTerminal: () => false,
   canOpenSessionWindow: () => false,
-  isSecondaryWindow: () => false,
   openSessionInNewWindow: vi.fn(),
   openSessionInTerminal: vi.fn()
 }))

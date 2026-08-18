@@ -69,9 +69,7 @@ describe('requestModelOptions', () => {
 
     vi.mocked(getGlobalModelOptions).mockResolvedValueOnce(restPayload)
 
-    await expect(requestModelOptions({ gateway: gateway as never, sessionId: 'session-1' })).resolves.toEqual(
-      restPayload
-    )
+    await expect(requestModelOptions({ gateway: gateway as never, sessionId: 'session-1' })).resolves.toEqual(restPayload)
     expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true })
   })
 
