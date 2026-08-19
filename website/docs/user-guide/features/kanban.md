@@ -419,7 +419,8 @@ before reaching the nudge, the dispatcher gives the violation a **bounded retry*
 (up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` consecutive violations, default 3)
 before auto-blocking the task instead of respawning it into the same loop. The
 budget counts only *consecutive* clean-exit protocol violations — interleaved
-rate-limited requeues are neutral, and any other failure kind resets the
+rate-limited requeues **and unclassified `pid N not alive` crashes** (no
+wait-status) are neutral, and any *classified* other failure kind resets the
 streak — and a per-task `max_retries` overrides the bound. This usually means
 the model wrote a plain-text answer and exited without using the Kanban tool
 surface.

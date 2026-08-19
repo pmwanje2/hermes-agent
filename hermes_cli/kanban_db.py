@@ -424,6 +424,23 @@ def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
 # during the launch window.
 DEFAULT_CRASH_GRACE_SECONDS = 30
 
+# A dead *recorded* PID is not proof the run is dead: ``_default_spawn``
+# stores ``Popen.pid``, which can be a wrapper that has already exited
+# (or a pid this process never reaped — ``start_new_session=True`` plus
+# a double-forking shim). While the *active run's* heartbeat is newer
+# than this window, ``detect_crashed_workers`` does not reap — the same
+# tick would otherwise flip the card to ready and spawn a replacement
+# beside a still-working grandchild (boq-003 2026-08-19).
+#
+# Applies to every exit classification: a wrapper that exits 0 is a
+# ``clean_exit`` / protocol-violation false positive if the grandchild
+# is still heartbeating. A truly-dead worker stops heartbeating; the
+# leftover stamp ages out and the next tick reaps.
+#
+# 120s covers "heartbeat seconds ago" across one 60s dispatcher tick.
+# 0 disables the hold (tests that want an immediate reap).
+DEFAULT_CRASH_HEARTBEAT_FRESH_SECONDS = 120
+
 
 # Sentinel exit code a kanban worker uses to signal "I bailed because the
 # provider rate-limited / exhausted quota, not because the task failed."
@@ -453,6 +470,25 @@ def _resolve_crash_grace_seconds() -> int:
         if parsed >= 0:
             return parsed
     return DEFAULT_CRASH_GRACE_SECONDS
+
+
+def _resolve_crash_heartbeat_fresh_seconds() -> int:
+    """Return how long a fresh *run* heartbeat shields a dead recorded PID.
+
+    Reads ``HERMES_KANBAN_CRASH_HEARTBEAT_FRESH_SECONDS``; falls back to
+    ``DEFAULT_CRASH_HEARTBEAT_FRESH_SECONDS`` when absent, empty,
+    non-integer, or negative. 0 disables the hold (tests that want an
+    immediate reap of a dead bookkeeping pid).
+    """
+    raw = os.environ.get("HERMES_KANBAN_CRASH_HEARTBEAT_FRESH_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = -1
+        if parsed >= 0:
+            return parsed
+    return DEFAULT_CRASH_HEARTBEAT_FRESH_SECONDS
 
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
@@ -9164,9 +9200,69 @@ _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
 
 # How far back to walk a task's closed runs when counting the violation
 # streak. The streak trips at a handful of violations, so anything beyond a
-# few dozen rows (violations interleaved with neutral rate-limited requeues)
-# can only mean "way past the bound" anyway.
+# few dozen rows (violations interleaved with neutral rate-limited requeues
+# or unclassified pid-gone crashes) can only mean "way past the bound" anyway.
 _PROTOCOL_VIOLATION_SCAN_LIMIT = 50
+
+
+def _parse_run_metadata(raw_meta: Optional[str]) -> dict:
+    """Best-effort JSON object from a ``task_runs.metadata`` cell."""
+    if not raw_meta:
+        return {}
+    try:
+        loaded = json.loads(raw_meta)
+    except (ValueError, TypeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _closed_run_is_protocol_violation(
+    outcome: str, error: Optional[str], raw_meta: Optional[str],
+) -> bool:
+    """True when this closed run is a clean-exit protocol violation."""
+    if outcome != "crashed":
+        return False
+    meta = _parse_run_metadata(raw_meta)
+    if meta.get("protocol_violation"):
+        return True
+    return "protocol violation" in (error or "")
+
+
+def _closed_run_is_neutral_for_violation_streak(
+    outcome: str, error: Optional[str], raw_meta: Optional[str],
+) -> bool:
+    """True when this closed run must neither count nor reset the streak.
+
+    Judgement (t_69ce312c / boq-003 2026-08-19): ``consecutive`` means
+    consecutive *classified task failures of this kind*, not consecutive
+    closed rows. Two closed-run shapes are silent about whether the
+    worker violated the protocol:
+
+    * ``rate_limited`` — quota wall, already skipped.
+    * an unclassified ``crashed`` row (``pid N not alive``, no
+      ``exit_kind`` / ``exit_code``). That is the dispatcher recording an
+      infra-kill it did not reap — the other face of the same reap /
+      respawn tick, not a different failure kind. Skipping it is what
+      makes the 3-strike breaker reachable when those rows interleave
+      with real violations.
+
+    A *classified* nonzero / signaled crash still resets: that is a
+    different failure, and ``consecutive`` would be meaningless if every
+    crash were skipped. ``completed`` / ``blocked`` / ``reclaimed`` /
+    ``timed_out`` / ``stale`` still reset — they are not infra-noise.
+    """
+    if outcome == "rate_limited":
+        return True
+    if outcome != "crashed":
+        return False
+    if _closed_run_is_protocol_violation(outcome, error, raw_meta):
+        return False
+    meta = _parse_run_metadata(raw_meta)
+    if meta.get("exit_kind"):
+        return False
+    if meta.get("exit_code") is not None:
+        return False
+    return True
 
 
 def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
@@ -9179,10 +9275,15 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     * ``rate_limited`` runs are neutral and skipped: a quota wall says nothing
       about the task, exactly as it is neutral for the unified
       ``consecutive_failures`` counter.
-    * Any other closed run (completed, plain crash, timeout, spawn failure,
-      reclaim, …) breaks the streak, so the bounded retry budget counts ONLY
-      protocol violations — mixed failure kinds can neither consume nor
-      extend it.
+    * Unclassified ``crashed`` rows (``pid N not alive``, no wait-status)
+      are also skipped: they are infra-kills / bookkeeping deaths, not a
+      different task-failure kind. Interleaving them with violations must
+      not reset the streak or the 3-strike breaker never trips (boq-003
+      2026-08-19).
+    * Any other closed run (completed, classified crash, timeout, spawn
+      failure, reclaim, …) breaks the streak, so the bounded retry budget
+      counts ONLY protocol violations — mixed *classified* failure kinds
+      can neither consume nor extend it.
 
     Violation runs are recognized by the ``protocol_violation`` marker that
     ``detect_crashed_workers`` stamps into the run metadata; the violation
@@ -9198,23 +9299,15 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     ).fetchall()
     for row in rows:
         outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
+        if _closed_run_is_neutral_for_violation_streak(
+            outcome, row["error"], row["metadata"],
+        ):
             continue
-        if outcome == "crashed":
-            is_violation = False
-            raw_meta = row["metadata"]
-            if raw_meta:
-                try:
-                    is_violation = bool(
-                        json.loads(raw_meta).get("protocol_violation")
-                    )
-                except (ValueError, TypeError):
-                    is_violation = False
-            if not is_violation:
-                is_violation = "protocol violation" in (row["error"] or "")
-            if is_violation:
-                streak += 1
-                continue
+        if _closed_run_is_protocol_violation(
+            outcome, row["error"], row["metadata"],
+        ):
+            streak += 1
+            continue
         break
     return streak
 
@@ -9236,6 +9329,14 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     violation (worker answered conversationally without calling
     ``kanban_complete`` / ``kanban_block``) and apply a bounded
     violation-only retry before tripping the breaker.
+
+    A dead recorded PID is *not* reaped while the *active run's*
+    ``last_heartbeat_at`` is newer than
+    :func:`_resolve_crash_heartbeat_fresh_seconds` (default 120s). The
+    stored pid can be a wrapper that already exited while a grandchild
+    is still working; reaping would flip the card to ``ready`` and the
+    same tick would spawn a replacement (boq-003 2026-08-19). The hold
+    uses the run row, not the sticky ``tasks.last_heartbeat_at``.
 
     When the reap registry has no entry (``unknown``), the death is
     treated as an infra-kill: the task is released back to its source
@@ -9268,7 +9369,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     with write_txn(conn):
         rows = conn.execute(
             "SELECT t.id, t.worker_pid, t.claim_lock, t.assignee, "
-            "       COALESCE(r.started_at, t.started_at) AS started_at "
+            "       COALESCE(r.started_at, t.started_at) AS started_at, "
+            "       r.last_heartbeat_at AS run_last_heartbeat_at "
             "FROM tasks t "
             "LEFT JOIN task_runs r ON r.id = t.current_run_id "
             "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL"
@@ -9293,6 +9395,26 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 if time.time() - started_at < grace:
                     continue
             if _pid_alive(row["worker_pid"]):
+                continue
+
+            # Fresh *this-run* heartbeat: the recorded PID being gone is
+            # not proof the run is dead (wrapper pid, init-reaped child,
+            # double-fork). Reaping would flip the card to ready and the
+            # same tick would spawn a replacement beside a still-working
+            # grandchild (boq-003 2026-08-19). Use the active run's
+            # heartbeat only — ``tasks.last_heartbeat_at`` is sticky
+            # across retries and would shield a brand-new dead worker.
+            # Applies to every classification: a wrapper that exits 0 is
+            # a false protocol violation if the grandchild still ticks.
+            fresh_for = _resolve_crash_heartbeat_fresh_seconds()
+            run_hb = None
+            if "run_last_heartbeat_at" in row.keys():
+                run_hb = row["run_last_heartbeat_at"]
+            if (
+                fresh_for > 0
+                and run_hb is not None
+                and (time.time() - int(run_hb)) < fresh_for
+            ):
                 continue
 
             pid = int(row["worker_pid"])
